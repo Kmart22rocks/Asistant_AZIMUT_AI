@@ -116,6 +116,18 @@ MainWindow::MainWindow(QWidget *parent)
         m_chatHistory->append("<b>АЗИМУТ:</b> Сервер готов. Открываю КОМПАС-3D...");
         onToggleConnect();
     });
+
+    connect(m_syncTimer, &QTimer::timeout, this, [this]() {
+    if (m_isConnected && !m_thinkingTimer->isActive()) {
+        m_kompasBridge->checkStatus();
+    }
+});
+
+    connect(m_procManager, &ProcessManager::pythonServerReady, this, [this]() {
+        m_chatHistory->append("<b>АЗИМУТ:</b> Сервер готов. Открываю КОМПАС-3D...");
+        onToggleConnect();
+        m_syncTimer->start(2500);
+    });
 }
 
 MainWindow::~MainWindow() {

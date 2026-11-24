@@ -34,3 +34,15 @@ target_link_libraries(Asistant_AZIMUT_II PRIVATE
         Qt6::Widgets
         Qt6::Network
 )
+
+add_library(AzimutPlugin SHARED
+        src_cpp/plugin/kompas_plugin.cpp
+        src_cpp/plugin/kompas_plugin.def
+)
+
+set_target_properties(AzimutPlugin PROPERTIES
+        PREFIX ""
+        SUFFIX ".rtw"
+)
+
+target_link_options(AzimutPlugin PRIVATE -static -static-libgcc -static-libstdc++)

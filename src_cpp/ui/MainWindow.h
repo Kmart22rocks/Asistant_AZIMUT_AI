@@ -5,6 +5,8 @@
 #include <QPushButton>
 #include <QLabel>
 #include <QTabWidget>
+#include <QSlider>
+#include <QComboBox>
 #include <QJsonObject>
 #include <QTimer>
 #include "StatusIndicator.h"
@@ -25,11 +27,15 @@ protected:
 private slots:
     void onToggleConnect();
     void onUndoClicked();
+    void onClearPartClicked();
     void onSendMessage();
     void onStatusUpdated(const QString &indicator, const QString &text, const QJsonObject &context);
     void onThinkingTick();
 
 private:
+    QWidget* createChatTab();
+    QWidget* createManualTab();
+    QWidget* createSettingsTab();
     void startThinkingAnimation();
     void finishThinkingWithText(const QString &htmlText);
     void toggleAssistantWindow();
@@ -43,6 +49,10 @@ private:
     QLineEdit *m_inputField;
     QPushButton *m_sendBtn;
 
+    QSlider *m_opacitySlider;
+    QLabel *m_opacityValueLabel;
+    double m_inactiveOpacity;
+
     ProcessManager *m_procManager;
     KompasBridge *m_kompasBridge;
     OllamaClient *m_ollamaClient;
@@ -50,5 +60,6 @@ private:
     bool m_isConnected;
 
     QTimer *m_thinkingTimer;
+    QTimer *m_syncTimer;
     int m_thinkingDots;
 };

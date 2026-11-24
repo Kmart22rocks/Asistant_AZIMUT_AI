@@ -36,6 +36,34 @@ class AzimutCadEngine:
         self.scanner = TreeScanner(self.kompas)
         self.features = {}
         self.history_stack = []
+        self.last_doc_ptr = None
+
+    def _sync_document_state(self):
+        if not self.kompas._check_active_doc():
+            self.features.clear()
+            self.history_stack.clear()
+            self.last_doc_ptr = None
+            return
+
+        current_ptr = id(self.kompas.doc3d_api7)
+        if self.last_doc_ptr is not None and self.last_doc_ptr != current_ptr:
+            self.features.clear()
+            self.history_stack.clear()
+        self.last_doc_ptr = current_ptr
+
+        native_names = {op["имя"] for op in self.scanner.get_native_tree_operations()}
+        to_remove = []
+        for fid, feat in self.features.items():
+            if feat.operation_entity is not None:
+                try:
+                    if feat.operation_entity.name not in native_names:
+                        to_remove.append(fid)
+                except Exception:
+                    to_remove.append(fid)
+        for fid in to_remove:
+            del self.features[fid]
+            if fid in self.history_stack:
+                self.history_stack.remove(fid)
 
     def _get_current_top_height(self) -> float:
         max_h = 0.0
@@ -69,8 +97,10 @@ class AzimutCadEngine:
 
         has_doc = self.kompas._check_active_doc()
         if not has_doc:
+            self._sync_document_state()
             return {"indicator": "yellow", "text": "КОМПАС открыт (нет 3D-детали)", "context": {}}
 
+        self._sync_document_state()
         return {
             "indicator": "green",
             "text": "Подключено к 3D-детали (.m3d)",
@@ -84,6 +114,7 @@ class AzimutCadEngine:
                 return {"status": "error", "message": "Не удалось подключиться к КОМПАС-3D"}
 
         self.kompas.ensure_part_document()
+        self._sync_document_state()
         commands = payload.get("commands", [payload])
         results = []
 
@@ -135,7 +166,7 @@ class AzimutCadEngine:
 
                 elif action == "undo":
                     if not self.history_stack:
-                        return {"status": "error", "message": "История шагов пуста, отменять нечего"}
+                        return {"status": "error", "message": "История шагов пуста"}
                     last_id = self.history_stack.pop()
                     if last_id in self.features:
                         self.features[last_id].delete()
@@ -144,13 +175,21 @@ class AzimutCadEngine:
 
                 elif action == "delete":
                     target_id = self._find_target_id(feat_id, feat_type)
-                    if not target_id:
-                        return {"status": "error", "message": f"Элемент {feat_id} не найден для удаления"}
-                    self.features[target_id].delete()
-                    del self.features[target_id]
-                    if target_id in self.history_stack:
-                        self.history_stack.remove(target_id)
-                    results.append(f"удалено {target_id}")
+                    if target_id:
+                        self.features[target_id].delete()
+                        del self.features[target_id]
+                        if target_id in self.history_stack:
+                            self.history_stack.remove(target_id)
+                        results.append(f"удалено {target_id}")
+                    else:
+                        native_ent = self.scanner.find_native_entity_by_name(feat_id)
+                        if native_ent is not None:
+                            self.kompas.doc3d_api5.ksDeleteEntity(native_ent)
+                            part = self.kompas.module5.ksPart(self.kompas.doc3d_api5.GetPart(-1))
+                            part.Update()
+                            results.append(f"удален элемент дерева {feat_id}")
+                        else:
+                            return {"status": "error", "message": f"Элемент {feat_id} не найден"}
 
                 elif action == "clear":
                     for fid in reversed(list(self.history_stack)):
