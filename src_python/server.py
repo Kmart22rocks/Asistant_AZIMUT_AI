@@ -13,6 +13,7 @@ from features.cylinder_feature import CylinderFeature, TubeFeature, PolygonPrism
 from features.cut_feature import SingleHoleFeature, CircularHolesFeature, CutBoxFeature
 from features.edge_feature import ChamferFeature, FilletFeature
 from features.custom_feature import CustomProfileFeature, SlotFeature, SphereFeature
+from features.advanced_feature import ShellFeature, HolesGridFeature, SteppedShaftFeature, AppearanceFeature
 
 
 def free_port_8765():
@@ -49,12 +50,16 @@ class AzimutCadEngine:
             "cone": ConeFeature,
             "hole": SingleHoleFeature,
             "holes_circ": CircularHolesFeature,
+            "holes_grid": HolesGridFeature,
             "cut_box": CutBoxFeature,
             "chamfer": ChamferFeature,
             "fillet": FilletFeature,
             "profile": CustomProfileFeature,
             "slot": SlotFeature,
-            "sphere": SphereFeature
+            "sphere": SphereFeature,
+            "shell": ShellFeature,
+            "shaft": SteppedShaftFeature,
+            "appearance": AppearanceFeature
         }
         cls = mapping.get(f_type)
         if cls:
@@ -87,15 +92,15 @@ class AzimutCadEngine:
 
     def _get_current_top_height(self):
         total_h = 0.0
-        boss_types = ("plate", "box", "cube", "cylinder", "tube", "polygon", "cone", "profile")
+        boss_types = ("plate", "box", "cube", "cylinder", "tube", "polygon", "cone", "profile", "shaft")
         for fid in self.feature_order:
             feat = self.features.get(fid)
             if feat and feat.feature_type in boss_types:
                 p = feat.params
                 h = float(p.get("thickness", p.get("height", p.get("h", p.get("size", p.get("side", 0.0))))))
-                z_base = float(p.get("z_offset", 0.0))
-                if z_base + h > total_h:
-                    total_h = z_base + h
+                y_base = float(p.get("y_offset", p.get("z_offset", 0.0)))
+                if y_base + h > total_h:
+                    total_h = y_base + h
         return total_h
 
     def _fill_base_plate_dims(self, params):
@@ -110,12 +115,6 @@ class AzimutCadEngine:
 
     def execute_commands(self, payload):
         print(f"Выполнение команд ИИ: {json.dumps(payload, ensure_ascii=False)}", flush=True)
-        doc5, part5, msg = self.connector.ensure_document()
-        if not doc5 or not part5:
-            return False, msg, []
-
-        self._sync_document_state(doc5, part5)
-
         commands = payload.get("commands", [])
         logs = []
 
@@ -124,6 +123,42 @@ class AzimutCadEngine:
             f_id = cmd.get("id", "")
             f_type = cmd.get("type", "")
             params = dict(cmd.get("params", {}))
+
+            if action == "doc_new" or f_type == "doc_new":
+                proj_name = params.get("name", params.get("filename", ""))
+                ok, res_msg = self.connector.create_new_project(proj_name)
+                if ok:
+                    self.features.clear()
+                    self.feature_order.clear()
+                logs.append(res_msg)
+                if not ok:
+                    return False, res_msg, logs
+                continue
+
+            if action == "doc_save" or f_type == "doc_save":
+                proj_name = params.get("name", params.get("filename", ""))
+                ok, res_msg = self.connector.save_project_dialog(proj_name)
+                logs.append(res_msg)
+                if not ok:
+                    return False, res_msg, logs
+                continue
+
+            if action == "doc_delete" or f_type == "doc_delete":
+                proj_name = params.get("name", params.get("filename", ""))
+                ok, res_msg = self.connector.delete_project(proj_name)
+                if ok:
+                    self.features.clear()
+                    self.feature_order.clear()
+                logs.append(res_msg)
+                if not ok:
+                    return False, res_msg, logs
+                continue
+
+            doc5, part5, msg = self.connector.ensure_document()
+            if not doc5 or not part5:
+                return False, msg, logs
+
+            self._sync_document_state(doc5, part5)
 
             if action == "clear":
                 for fid in reversed(list(self.feature_order)):
@@ -216,13 +251,13 @@ class AzimutCadEngine:
                     has_selected_face = sel.get("selected_faces", 0) > 0
                     top_h = self._get_current_top_height()
 
-                    boss_types = ("plate", "box", "cube", "cylinder", "tube", "polygon", "cone", "profile")
-                    cut_types = ("hole", "holes_circ", "cut_box", "slot")
+                    boss_types = ("plate", "box", "cube", "cylinder", "tube", "polygon", "cone", "profile", "shaft")
+                    cut_types = ("hole", "holes_circ", "holes_grid", "cut_box", "slot")
 
-                    if f_type in boss_types and "z_offset" not in params and len(self.feature_order) > 0 and not has_selected_face:
+                    if f_type in boss_types and "z_offset" not in params and "y_offset" not in params and len(self.feature_order) > 0 and not has_selected_face:
                         if top_h > 0:
                             params["z_offset"] = top_h
-                    elif f_type in cut_types and "z_offset" not in params and not has_selected_face:
+                    elif f_type in cut_types and "z_offset" not in params and "y_offset" not in params and not has_selected_face:
                         if top_h > 0:
                             params["z_offset"] = top_h
                     elif f_type == "holes_corner":

@@ -29,6 +29,7 @@ protected:
 private slots:
     void onSendClicked();
     void onUndoClicked();
+    void onClearClicked();
     void onKompasStatusUpdated(bool connected, bool docOpen, const QString& docName, const QString& message);
     void onExecutionFinished(bool success, const QString& message, const QStringList& logs);
     void onThinkingTick();
@@ -45,6 +46,7 @@ private:
     StatusIndicator* m_statusIndicator;
     QLabel* m_statusLabel;
     QPushButton* m_undoBtn;
+    QPushButton* m_clearBtn;
     QPushButton* m_connectBtn;
     QTabWidget* m_tabs;
     QTextEdit* m_chatView;

@@ -46,6 +46,12 @@ void ProcessManager::startServices() {
     m_ollamaProcess->start(ollamaExe, QStringList() << "serve");
 }
 
+void ProcessManager::unloadModel(const QString& modelName) {
+    if (modelName.isEmpty()) return;
+    QString ollamaExe = "C:/Users/Kmart22rocks/AppData/Local/Programs/Ollama/ollama.exe";
+    QProcess::startDetached(ollamaExe, QStringList() << "stop" << modelName);
+}
+
 void ProcessManager::stopServices() {
     QString ollamaExe = "C:/Users/Kmart22rocks/AppData/Local/Programs/Ollama/ollama.exe";
     QProcess::execute(ollamaExe, QStringList() << "stop" << "qwen2.5-coder:14b");

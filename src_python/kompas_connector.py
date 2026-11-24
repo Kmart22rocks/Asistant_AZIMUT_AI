@@ -158,17 +158,23 @@ class KompasConnector:
         self.is_connected = False
         return True, "Отключено от КОМПАС-3D"
 
-    def bring_to_front(self):
+    def _get_kompas_hwnd(self):
+        hwnds = []
         try:
             def enum_handler(hwnd, result_list):
                 if win32gui.IsWindowVisible(hwnd):
                     title = win32gui.GetWindowText(hwnd)
                     if "КОМПАС-3D" in title or "KOMPAS-3D" in title:
                         result_list.append(hwnd)
-            hwnds = []
             win32gui.EnumWindows(enum_handler, hwnds)
-            if hwnds:
-                target = hwnds[0]
+        except Exception:
+            pass
+        return hwnds[0] if hwnds else 0
+
+    def bring_to_front(self):
+        try:
+            target = self._get_kompas_hwnd()
+            if target:
                 if win32gui.IsIconic(target):
                     win32gui.ShowWindow(target, win32con.SW_RESTORE)
                 win32gui.SetForegroundWindow(target)
@@ -199,6 +205,109 @@ class KompasConnector:
         if not ok:
             return None, None, msg
         return None, None, "Не удалось создать 3D-документ в КОМПАС-3D."
+
+    def create_new_project(self, project_name=""):
+        if not self.is_connected or not self.api7:
+            ok, msg = self.connect()
+            if not ok:
+                return False, msg
+        try:
+            docs = self.api7.Documents
+            docs.Add(4, True)
+            time.sleep(0.3)
+            self._refresh_active_doc_pointers()
+            if project_name and self.part_api5:
+                clean_name = project_name.replace(".m3d", "").strip()
+                self.part_api5.name = clean_name
+                self.part_api5.Update()
+            self.bring_to_front()
+            label = f" «{project_name}»" if project_name else ""
+            return True, f"Создан новый 3D-проект{label} (.m3d)"
+        except Exception as e:
+            return False, f"Ошибка создания нового проекта: {str(e)}"
+
+    def save_project_dialog(self, suggested_name=""):
+        doc5, part5, msg = self.ensure_document()
+        if not doc5 or not self.doc_api7:
+            return False, msg
+
+        default_name = suggested_name.strip() if suggested_name else ""
+        if not default_name:
+            doc_title = getattr(self.doc_api7, "Name", "") or "Деталь"
+            default_name = doc_title
+        if not default_name.lower().endswith(".m3d"):
+            default_name += ".m3d"
+
+        if part5 and suggested_name:
+            part5.name = suggested_name.replace(".m3d", "").strip()
+            part5.Update()
+
+        self.bring_to_front()
+        hwnd = self._get_kompas_hwnd()
+        initial_dir = os.path.expanduser("~\\Documents")
+
+        try:
+            flags = win32con.OFN_EXPLORER | win32con.OFN_OVERWRITEPROMPT | win32con.OFN_PATHMUSTEXIST
+            file_path, _, _ = win32gui.GetSaveFileNameW(
+                hwndOwner=hwnd,
+                Filter="Детали КОМПАС-3D (*.m3d)\0*.m3d\0Все файлы (*.*)\0*.*\0",
+                FilterIndex=1,
+                File=default_name,
+                InitialDir=initial_dir,
+                Title="Сохранение 3D-проекта КОМПАС-3D",
+                Flags=flags,
+                DefExt="m3d"
+            )
+            if not file_path:
+                return False, "Сохранение отменено пользователем"
+
+            saved = False
+            try:
+                saved = bool(self.doc_api7.SaveAs(file_path))
+            except Exception:
+                saved = False
+            if not saved and self.doc3d_api5:
+                saved = bool(self.doc3d_api5.SaveAs(file_path))
+
+            return True, f"Проект успешно сохранен: {file_path}"
+        except Exception as e:
+            return False, f"Сохранение отменено или возникла ошибка: {str(e)}"
+
+    def delete_project(self, target_name=""):
+        if not self.is_connected or not self.api7:
+            return False, "Нет активного подключения к КОМПАС-3D"
+        try:
+            doc7 = self.api7.ActiveDocument
+            if doc7 is None:
+                return False, "В КОМПАС-3D нет открытого проекта для удаления"
+
+            doc_name = getattr(doc7, "Name", "")
+            doc_path = getattr(doc7, "PathName", "")
+            doc7.Close(False)
+            self._refresh_active_doc_pointers()
+
+            removed_from_disk = False
+            if doc_path and os.path.exists(doc_path) and doc_path.lower().endswith(".m3d"):
+                try:
+                    os.remove(doc_path)
+                    removed_from_disk = True
+                except Exception:
+                    pass
+            elif target_name:
+                cand = target_name if target_name.lower().endswith(".m3d") else target_name + ".m3d"
+                doc_dir = os.path.join(os.path.expanduser("~\\Documents"), cand)
+                if os.path.exists(doc_dir):
+                    try:
+                        os.remove(doc_dir)
+                        removed_from_disk = True
+                    except Exception:
+                        pass
+
+            if removed_from_disk:
+                return True, f"Проект «{doc_name or target_name}» закрыт и удален с диска"
+            return True, f"Проект «{doc_name or 'Деталь'}» закрыт без сохранения"
+        except Exception as e:
+            return False, f"Ошибка удаления проекта: {str(e)}"
 
     def get_status(self):
         pythoncom.CoInitialize()

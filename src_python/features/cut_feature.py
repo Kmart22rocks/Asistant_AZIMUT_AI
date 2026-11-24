@@ -8,15 +8,15 @@ class SingleHoleFeature(BaseFeature):
         self.params.update(params)
         diameter = float(self.params.get("diameter", self.params.get("d", 10.0)))
         cx = float(self.params.get("x", 0.0))
-        cy = float(self.params.get("y", 0.0))
+        cz = float(self.params.get("z", self.params.get("y", 0.0)))
         through = bool(self.params.get("through", True))
         depth = float(self.params.get("depth", self.params.get("h", 10.0)))
-        z_offset = float(self.params.get("z_offset", 0.0))
+        y_offset = float(self.params.get("y_offset", self.params.get("z_offset", 0.0)))
 
-        plane = self._get_work_plane(z_offset)
+        plane = self._get_work_plane(y_offset)
         sketch_ent, sketch_def = self._create_sketch(plane)
         doc2d = self._begin_sketch_edit(sketch_def)
-        doc2d.ksCircle(cx, cy, diameter / 2.0, 1)
+        doc2d.ksCircle(cx, cz, diameter / 2.0, 1)
         sketch_def.EndEdit()
 
         self._extrude_cut(sketch_ent, depth, through, f"Отверстие_{self.feature_id}")
@@ -31,11 +31,13 @@ class CircularHolesFeature(BaseFeature):
         count = max(1, int(self.params.get("count", 6)))
         diameter = float(self.params.get("diameter", self.params.get("d", 8.0)))
         circle_d = float(self.params.get("circle_diameter", self.params.get("pitch_diameter", 60.0)))
+        cx = float(self.params.get("x", 0.0))
+        cz = float(self.params.get("z", self.params.get("y", 0.0)))
         through = bool(self.params.get("through", True))
         depth = float(self.params.get("depth", 10.0))
-        z_offset = float(self.params.get("z_offset", 0.0))
+        y_offset = float(self.params.get("y_offset", self.params.get("z_offset", 0.0)))
 
-        plane = self._get_work_plane(z_offset)
+        plane = self._get_work_plane(y_offset)
         sketch_ent, sketch_def = self._create_sketch(plane)
         doc2d = self._begin_sketch_edit(sketch_def)
 
@@ -43,9 +45,9 @@ class CircularHolesFeature(BaseFeature):
         hole_r = diameter / 2.0
         for i in range(count):
             ang = 2.0 * math.pi * i / count
-            hx = pitch_r * math.cos(ang)
-            hy = pitch_r * math.sin(ang)
-            doc2d.ksCircle(hx, hy, hole_r, 1)
+            hx = cx + pitch_r * math.cos(ang)
+            hz = cz + pitch_r * math.sin(ang)
+            doc2d.ksCircle(hx, hz, hole_r, 1)
         sketch_def.EndEdit()
 
         self._extrude_cut(sketch_ent, depth, through, f"ОтверстияПоОкружности_{self.feature_id}")
@@ -60,22 +62,22 @@ class CutBoxFeature(BaseFeature):
         length = float(self.params.get("length", self.params.get("l", 20.0)))
         depth = float(self.params.get("depth", self.params.get("height", 10.0)))
         cx = float(self.params.get("x", 0.0))
-        cy = float(self.params.get("y", 0.0))
+        cz = float(self.params.get("z", self.params.get("y", 0.0)))
         through = bool(self.params.get("through", False))
-        z_offset = float(self.params.get("z_offset", 0.0))
+        y_offset = float(self.params.get("y_offset", self.params.get("z_offset", 0.0)))
 
-        plane = self._get_work_plane(z_offset)
+        plane = self._get_work_plane(y_offset)
         sketch_ent, sketch_def = self._create_sketch(plane)
         doc2d = self._begin_sketch_edit(sketch_def)
 
         hw = width / 2.0
         hl = length / 2.0
-        x1, y1 = cx - hw, cy - hl
-        x2, y2 = cx + hw, cy + hl
-        doc2d.ksLineSeg(x1, y1, x2, y1, 1)
-        doc2d.ksLineSeg(x2, y1, x2, y2, 1)
-        doc2d.ksLineSeg(x2, y2, x1, y2, 1)
-        doc2d.ksLineSeg(x1, y2, x1, y1, 1)
+        x1, z1 = cx - hw, cz - hl
+        x2, z2 = cx + hw, cz + hl
+        doc2d.ksLineSeg(x1, z1, x2, z1, 1)
+        doc2d.ksLineSeg(x2, z1, x2, z2, 1)
+        doc2d.ksLineSeg(x2, z2, x1, z2, 1)
+        doc2d.ksLineSeg(x1, z2, x1, z1, 1)
         sketch_def.EndEdit()
 
         self._extrude_cut(sketch_ent, depth, through, f"Вырез_{self.feature_id}")

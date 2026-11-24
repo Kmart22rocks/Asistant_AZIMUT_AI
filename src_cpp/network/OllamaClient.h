@@ -12,6 +12,7 @@ public:
     void sendPrompt(const QString& userText);
     void updateContext(const QJsonArray& features, const QJsonObject& selection, const QJsonArray& nativeTree);
     void setModelName(const QString& modelName);
+    void unloadModelFromMemory(const QString& modelName);
     QString modelName() const;
 
     signals:

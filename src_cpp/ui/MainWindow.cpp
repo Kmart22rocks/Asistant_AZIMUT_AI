@@ -143,11 +143,13 @@ void MainWindow::setupUi() {
     m_statusIndicator = new StatusIndicator(this);
     m_statusLabel = new QLabel("Отключено", this);
     m_undoBtn = new QPushButton("Шаг назад", this);
+    m_clearBtn = new QPushButton("Очистить", this);
     m_connectBtn = new QPushButton("Подключить", this);
 
     topBar->addWidget(m_statusIndicator);
     topBar->addWidget(m_statusLabel, 1);
     topBar->addWidget(m_undoBtn);
+    topBar->addWidget(m_clearBtn);
     topBar->addWidget(m_connectBtn);
 
     m_selectionInfoLabel = new QLabel("Операций ИИ: 0 | В дереве: 0 | Выделено граней: 0, ребер: 0", this);
@@ -164,7 +166,7 @@ void MainWindow::setupUi() {
 
     QHBoxLayout* inputLayout = new QHBoxLayout();
     m_inputEdit = new QLineEdit(this);
-    m_inputEdit->setPlaceholderText("Опишите деталь или изменение (например: фаска 2 мм)...");
+    m_inputEdit->setPlaceholderText("Опишите деталь, материал или сохранение проекта...");
     m_sendBtn = new QPushButton("Отправить", this);
 
     inputLayout->addWidget(m_inputEdit, 1);
@@ -179,12 +181,12 @@ void MainWindow::setupUi() {
     helpText->setReadOnly(true);
     helpText->setHtml(
         "<h3>Инструкция по работе с АЗИМУТ</h3>"
-        "<p><b>Горячая клавиша:</b> Нажмите <b>Alt + A</b> для мгновенного показа или скрытия окна ассистента.</p>"
-        "<p><b>1. Базовые тела:</b> Пластина, параллелепипед, куб, цилиндр, труба, многогранная призма, конус, шар, паз и произвольный 2D-профиль по точкам.</p>"
-        "<p><b>2. Вырезы и отверстия:</b> Одиночное отверстие, 4 отверстия по углам (отступ от края по ГОСТ), отверстия по окружности (фланец), прямоугольный паз/вырез.</p>"
-        "<p><b>3. Фаски и скругления:</b> Напишите <i>«сделай фаску 2 мм»</i> или <i>«скругление радиусом 3 мм»</i>. Если в КОМПАС-3D мышкой выделены конкретные ребра или грани — операция применится к ним.</p>"
-        "<p><b>4. Построение на выбранной грани:</b> Выделите плоскую грань детали мышкой в КОМПАС-3D и напишите <i>«построй на этой грани цилиндр диаметром 20 и высотой 15»</i>.</p>"
-        "<p><b>5. Управление историей:</b> Кнопка <b>«Шаг назад»</b> или команды <i>«отмени последний шаг»</i>, <i>«удали фаску»</i>, <i>«очисти деталь»</i>.</p>"
+        "<p><b>Горячая клавиша:</b> <b>Alt + A</b> — мгновенно скрыть или показать окно ассистента.</p>"
+        "<p><b>Система координат:</b> Пол — плоскость <b>ZOX</b>. Вверх — <b>+Y</b>. Вправо / Влево — <b>-Z / +Z</b>. Вперёд / Назад — <b>-X / +X</b>.</p>"
+        "<p><b>1. Базовые и инженерные тела:</b> Пластина, куб, цилиндр, труба, многогранная призма, конус, шар, паз, ступенчатый вал, тонкостенная оболочка (корпус), 2D-профиль по точкам.</p>"
+        "<p><b>2. Вырезы и массивы отверстий:</b> Одиночное отверстие, 4 угловых отверстия по ГОСТ, отверстия по окружности (фланец), сетка/ряд отверстий, прямоугольный карман.</p>"
+        "<p><b>3. Фаски, скругления, материал:</b> Фаски и скругления по выделенным граням/ребрам; окраска и назначение материала (сталь, алюминий, медь, латунь, титан, золото).</p>"
+        "<p><b>4. Управление проектами .m3d:</b> Команды <i>«создай новый проект Корпус»</i>, <i>«сохрани проект как Редуктор»</i> (откроет окно сохранения КОМПАС-3D), <i>«удали проект»</i>.</p>"
     );
     helpLayout->addWidget(helpText);
 
@@ -197,9 +199,13 @@ void MainWindow::setupUi() {
     m_modelCombo->addItem("Qwen 2.5 Coder 7B (Быстрая, ~4.7 ГБ)", "qwen2.5-coder:7b");
 
     connect(m_modelCombo, &QComboBox::currentIndexChanged, this, [this](int index) {
+        QString oldModel = m_ollamaClient->modelName();
         QString selectedModel = m_modelCombo->itemData(index).toString();
-        m_ollamaClient->setModelName(selectedModel);
-        appendChatMessage("Система", "Активная модель переключена на: " + selectedModel, "#1565C0");
+        if (oldModel != selectedModel) {
+            m_ollamaClient->setModelName(selectedModel);
+            m_procManager->unloadModel(oldModel);
+            appendChatMessage("Система", QString("Модель %1 выгружена из ОЗУ. Активная модель: %2").arg(oldModel, selectedModel), "#1565C0");
+        }
     });
 
     QLabel* opacityLabel = new QLabel("Прозрачность окна в неактивном режиме (%):", this);
@@ -230,6 +236,7 @@ void MainWindow::setupUi() {
     connect(m_sendBtn, &QPushButton::clicked, this, &MainWindow::onSendClicked);
     connect(m_inputEdit, &QLineEdit::returnPressed, this, &MainWindow::onSendClicked);
     connect(m_undoBtn, &QPushButton::clicked, this, &MainWindow::onUndoClicked);
+    connect(m_clearBtn, &QPushButton::clicked, this, &MainWindow::onClearClicked);
 
     connect(m_connectBtn, &QPushButton::clicked, this, [this]() {
         if (m_isConnected) {
@@ -248,8 +255,8 @@ void MainWindow::setupUi() {
 void MainWindow::applyLightTheme() {
     setStyleSheet(
         "QMainWindow, QWidget { background-color: #F8F9FA; color: #212529; font-family: 'Segoe UI'; font-size: 13px; }"
-        "QTextEdit, QLineEdit { background-color: #FFFFFF; border: 1px solid #CED4DA; border-radius: 6px; padding: 6px; color: #212529; }"
-        "QPushButton { background-color: #1976D2; color: #FFFFFF; border: none; border-radius: 6px; padding: 6px 12px; font-weight: bold; }"
+        "QTextEdit, QLineEdit, QComboBox { background-color: #FFFFFF; border: 1px solid #CED4DA; border-radius: 6px; padding: 6px; color: #212529; }"
+        "QPushButton { background-color: #1976D2; color: #FFFFFF; border: none; border-radius: 6px; padding: 6px 10px; font-weight: bold; }"
         "QPushButton:hover { background-color: #1565C0; }"
         "QPushButton:disabled { background-color: #90CAF9; }"
         "QTabWidget::pane { border: 1px solid #DEE2E6; border-radius: 6px; background: #FFFFFF; }"
@@ -323,6 +330,17 @@ void MainWindow::onUndoClicked() {
     if (m_isThinking) return;
     QJsonObject cmd;
     cmd["action"] = "undo";
+    QJsonArray arr;
+    arr.append(cmd);
+    QJsonObject payload;
+    payload["commands"] = arr;
+    m_kompasBridge->executeCommands(payload);
+}
+
+void MainWindow::onClearClicked() {
+    if (m_isThinking) return;
+    QJsonObject cmd;
+    cmd["action"] = "clear";
     QJsonArray arr;
     arr.append(cmd);
     QJsonObject payload;

@@ -11,12 +11,14 @@ class CustomProfileFeature(BaseFeature):
         height = float(self.params.get("height", self.params.get("thickness", self.params.get("depth", 15.0))))
         is_cut = bool(self.params.get("is_cut", False))
         through = bool(self.params.get("through", False))
-        z_offset = float(self.params.get("z_offset", 0.0))
+        y_offset = float(self.params.get("y_offset", self.params.get("z_offset", 0.0)))
+        self.params["height"] = height
+        self.params["z_offset"] = y_offset
 
         if len(points) < 3:
             return False, "Для построения профиля необходимо минимум 3 точки."
 
-        plane = self._get_work_plane(z_offset)
+        plane = self._get_work_plane(y_offset)
         sketch_ent, sketch_def = self._create_sketch(plane)
         doc2d = self._begin_sketch_edit(sketch_def)
 
@@ -43,11 +45,12 @@ class SlotFeature(BaseFeature):
         width = float(self.params.get("width", self.params.get("w", 10.0)))
         depth = float(self.params.get("depth", self.params.get("height", 10.0)))
         cx = float(self.params.get("x", 0.0))
-        cy = float(self.params.get("y", 0.0))
+        cz = float(self.params.get("z", self.params.get("y", 0.0)))
         angle_deg = float(self.params.get("angle", 0.0))
         is_cut = bool(self.params.get("is_cut", True))
         through = bool(self.params.get("through", False))
-        z_offset = float(self.params.get("z_offset", 0.0))
+        y_offset = float(self.params.get("y_offset", self.params.get("z_offset", 0.0)))
+        self.params["z_offset"] = y_offset
 
         r = width / 2.0
         straight = max(0.0, length - width)
@@ -56,15 +59,15 @@ class SlotFeature(BaseFeature):
         cos_a = math.cos(rad)
         sin_a = math.sin(rad)
 
-        def rot(px, py):
-            return (cx + px * cos_a - py * sin_a, cy + px * sin_a + py * cos_a)
+        def rot(px, pz):
+            return (cx + px * cos_a - pz * sin_a, cz + px * sin_a + pz * cos_a)
 
-        plane = self._get_work_plane(z_offset)
+        plane = self._get_work_plane(y_offset)
         sketch_ent, sketch_def = self._create_sketch(plane)
         doc2d = self._begin_sketch_edit(sketch_def)
 
         if straight < 1e-4:
-            doc2d.ksCircle(cx, cy, r, 1)
+            doc2d.ksCircle(cx, cz, r, 1)
         else:
             p_tl = rot(-half_s, r)
             p_tr = rot(half_s, r)
@@ -94,18 +97,19 @@ class SphereFeature(BaseFeature):
         diameter = float(self.params.get("diameter", self.params.get("d", float(self.params.get("radius", 20.0)) * 2.0)))
         r = diameter / 2.0
         cx = float(self.params.get("x", 0.0))
-        cy = float(self.params.get("y", 0.0))
-        z_offset = float(self.params.get("z_offset", 0.0))
+        cz = float(self.params.get("z", self.params.get("y", 0.0)))
+        y_offset = float(self.params.get("y_offset", self.params.get("z_offset", 0.0)))
         self.params["diameter"] = diameter
         self.params["height"] = diameter
+        self.params["z_offset"] = y_offset
 
-        plane = self._get_work_plane(z_offset)
+        plane = self._get_work_plane(y_offset)
         sketch_ent, sketch_def = self._create_sketch(plane)
         doc2d = self._begin_sketch_edit(sketch_def)
 
-        doc2d.ksLineSeg(cx - r, cy, cx + r, cy, 3)
-        doc2d.ksLineSeg(cx - r, cy, cx + r, cy, 1)
-        doc2d.ksArcBy3Points(cx - r, cy, cx, cy + r, cx + r, cy, 1)
+        doc2d.ksLineSeg(cx - r, cz, cx + r, cz, 3)
+        doc2d.ksLineSeg(cx - r, cz, cx + r, cz, 1)
+        doc2d.ksArcBy3Points(cx - r, cz, cx, cz + r, cx + r, cz, 1)
         sketch_def.EndEdit()
 
         rot_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_bossRotated))

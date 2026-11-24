@@ -10,6 +10,7 @@ public:
 
     void startServices();
     void stopServices();
+    void unloadModel(const QString& modelName);
 
     signals:
         void pythonServerReady();
