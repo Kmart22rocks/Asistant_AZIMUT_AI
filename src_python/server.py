@@ -1,6 +1,10 @@
-import sys
 import json
+import os
+import subprocess
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse
+import pythoncom
 from kompas_connector import KompasConnector
 from tree_scanner import TreeScanner
 from features.plate_feature import PlateFeature
@@ -8,249 +12,331 @@ from features.holes_feature import CornerHolesFeature
 from features.cylinder_feature import CylinderFeature, TubeFeature, PolygonPrismFeature, ConeFeature
 from features.cut_feature import SingleHoleFeature, CircularHolesFeature, CutBoxFeature
 from features.edge_feature import ChamferFeature, FilletFeature
+from features.custom_feature import CustomProfileFeature, SlotFeature, SphereFeature
 
-sys.stdout.reconfigure(encoding='utf-8')
+
+def free_port_8765():
+    try:
+        out = subprocess.check_output(["netstat", "-ano"], text=True, stderr=subprocess.DEVNULL)
+        current_pid = os.getpid()
+        for line in out.splitlines():
+            if "127.0.0.1:8765" in line and "LISTENING" in line:
+                parts = line.split()
+                pid = int(parts[-1])
+                if pid != current_pid and pid > 0:
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 class AzimutCadEngine:
-    FEATURE_MAP = {
-        "plate": PlateFeature,
-        "box": PlateFeature,
-        "cube": PlateFeature,
-        "corner_holes": CornerHolesFeature,
-        "cylinder": CylinderFeature,
-        "tube": TubeFeature,
-        "polygon": PolygonPrismFeature,
-        "cone": ConeFeature,
-        "hole": SingleHoleFeature,
-        "circle_holes": CircularHolesFeature,
-        "cut_box": CutBoxFeature,
-        "chamfer": ChamferFeature,
-        "fillet": FilletFeature
-    }
-
-    BOSS_TYPES = {"plate", "box", "cube", "cylinder", "tube", "polygon", "cone"}
-
     def __init__(self):
-        self.kompas = KompasConnector()
-        self.scanner = TreeScanner(self.kompas)
+        self.connector = KompasConnector()
         self.features = {}
-        self.history_stack = []
-        self.last_doc_ptr = None
+        self.feature_order = []
+        self.active_doc_name = ""
+        self.active_part_ptr = None
 
-    def _sync_document_state(self):
-        if not self.kompas._check_active_doc():
-            self.features.clear()
-            self.history_stack.clear()
-            self.last_doc_ptr = None
-            return
-
-        current_ptr = id(self.kompas.doc3d_api7)
-        if self.last_doc_ptr is not None and self.last_doc_ptr != current_ptr:
-            self.features.clear()
-            self.history_stack.clear()
-        self.last_doc_ptr = current_ptr
-
-        native_names = {op["имя"] for op in self.scanner.get_native_tree_operations()}
-        to_remove = []
-        for fid, feat in self.features.items():
-            if feat.operation_entity is not None:
-                try:
-                    if feat.operation_entity.name not in native_names:
-                        to_remove.append(fid)
-                except Exception:
-                    to_remove.append(fid)
-        for fid in to_remove:
-            del self.features[fid]
-            if fid in self.history_stack:
-                self.history_stack.remove(fid)
-
-    def _get_current_top_height(self) -> float:
-        max_h = 0.0
-        for fid, feat in self.features.items():
-            p = feat.params
-            z0 = float(p.get("z_offset", 0))
-            h = float(p.get("thickness", p.get("height", 0)))
-            if h > 0 and (z0 + h) > max_h:
-                max_h = z0 + h
-        return max_h
-
-    def _get_base_plate_dims(self) -> tuple:
-        for fid, feat in self.features.items():
-            if "width" in feat.params and "length" in feat.params:
-                return float(feat.params["width"]), float(feat.params["length"])
-        return 100.0, 50.0
-
-    def _find_target_id(self, feat_id: str, feat_type: str) -> str:
-        if feat_id and feat_id in self.features:
-            return feat_id
-        if feat_type and feat_type in self.features:
-            return feat_type
-        for k in reversed(self.history_stack):
-            if feat_type and k.startswith(feat_type):
-                return k
-        return ""
-
-    def get_status(self) -> dict:
-        if not self.kompas.is_connected:
-            return {"indicator": "red", "text": "Отключено от КОМПАС-3D", "context": {}}
-
-        has_doc = self.kompas._check_active_doc()
-        if not has_doc:
-            self._sync_document_state()
-            return {"indicator": "yellow", "text": "КОМПАС открыт (нет 3D-детали)", "context": {}}
-
-        self._sync_document_state()
-        return {
-            "indicator": "green",
-            "text": "Подключено к 3D-детали (.m3d)",
-            "context": self.scanner.get_compact_tree(self.features)
+    def _create_feature_instance(self, f_type, f_id):
+        mapping = {
+            "plate": PlateFeature,
+            "box": PlateFeature,
+            "cube": PlateFeature,
+            "holes_corner": CornerHolesFeature,
+            "cylinder": CylinderFeature,
+            "tube": TubeFeature,
+            "polygon": PolygonPrismFeature,
+            "cone": ConeFeature,
+            "hole": SingleHoleFeature,
+            "holes_circ": CircularHolesFeature,
+            "cut_box": CutBoxFeature,
+            "chamfer": ChamferFeature,
+            "fillet": FilletFeature,
+            "profile": CustomProfileFeature,
+            "slot": SlotFeature,
+            "sphere": SphereFeature
         }
+        cls = mapping.get(f_type)
+        if cls:
+            feat = cls(f_id, self.connector)
+            feat.feature_type = f_type
+            return feat
+        return None
 
-    def execute_batch(self, payload: dict) -> dict:
-        if not self.kompas.is_connected:
-            res = self.kompas.connect()
-            if res["status"] != "connected":
-                return {"status": "error", "message": "Не удалось подключиться к КОМПАС-3D"}
+    def _sync_document_state(self, doc5, part5):
+        try:
+            doc_info = self.connector.get_status()
+            doc_name = doc_info.get("doc_name", "")
+            part_ptr = int(part5._oleobj_) if hasattr(part5, "_oleobj_") else id(part5)
+            if (self.active_doc_name and self.active_doc_name != doc_name) or (self.active_part_ptr and self.active_part_ptr != part_ptr):
+                self.features.clear()
+                self.feature_order.clear()
+            self.active_doc_name = doc_name
+            self.active_part_ptr = part_ptr
+        except Exception:
+            pass
 
-        self.kompas.ensure_part_document()
-        self._sync_document_state()
-        commands = payload.get("commands", [payload])
-        results = []
+        stale_ids = []
+        for fid, feat in self.features.items():
+            if not feat.is_alive():
+                stale_ids.append(fid)
+        for fid in stale_ids:
+            self.features.pop(fid, None)
+            if fid in self.feature_order:
+                self.feature_order.remove(fid)
+
+    def _get_current_top_height(self):
+        total_h = 0.0
+        boss_types = ("plate", "box", "cube", "cylinder", "tube", "polygon", "cone", "profile")
+        for fid in self.feature_order:
+            feat = self.features.get(fid)
+            if feat and feat.feature_type in boss_types:
+                p = feat.params
+                h = float(p.get("thickness", p.get("height", p.get("h", p.get("size", p.get("side", 0.0))))))
+                z_base = float(p.get("z_offset", 0.0))
+                if z_base + h > total_h:
+                    total_h = z_base + h
+        return total_h
+
+    def _fill_base_plate_dims(self, params):
+        if "plate_width" in params and "plate_length" in params:
+            return
+        for fid in self.feature_order:
+            feat = self.features.get(fid)
+            if feat and feat.feature_type in ("plate", "box", "cube"):
+                params.setdefault("plate_width", feat.params.get("width", 100.0))
+                params.setdefault("plate_length", feat.params.get("length", 100.0))
+                return
+
+    def execute_commands(self, payload):
+        print(f"Выполнение команд ИИ: {json.dumps(payload, ensure_ascii=False)}", flush=True)
+        doc5, part5, msg = self.connector.ensure_document()
+        if not doc5 or not part5:
+            return False, msg, []
+
+        self._sync_document_state(doc5, part5)
+
+        commands = payload.get("commands", [])
+        logs = []
 
         for cmd in commands:
-            action = cmd.get("action")
-            feat_type = cmd.get("type", "")
-            feat_id = cmd.get("id", feat_type)
-            params = cmd.get("params", {})
+            action = cmd.get("action", "build")
+            f_id = cmd.get("id", "")
+            f_type = cmd.get("type", "")
+            params = dict(cmd.get("params", {}))
 
-            try:
-                if action == "build":
-                    if feat_type not in self.FEATURE_MAP:
-                        return {"status": "error", "message": f"Неизвестный тип операции: {feat_type}"}
+            if action == "clear":
+                for fid in reversed(list(self.feature_order)):
+                    feat = self.features.get(fid)
+                    if feat:
+                        feat.sync_refs(doc5, part5)
+                        feat.delete()
+                self.features.clear()
+                self.feature_order.clear()
+                logs.append("Деталь полностью очищена")
+                continue
 
-                    if feat_type == "corner_holes":
-                        bw, bl = self._get_base_plate_dims()
-                        params.setdefault("plate_width", bw)
-                        params.setdefault("plate_length", bl)
+            if action == "undo":
+                if self.feature_order:
+                    last_id = self.feature_order.pop()
+                    feat = self.features.pop(last_id, None)
+                    if feat:
+                        feat.sync_refs(doc5, part5)
+                        feat.delete()
+                        logs.append(f"Отменена операция: {last_id}")
+                else:
+                    logs.append("Нет операций для отмены")
+                continue
 
-                    if feat_type in self.BOSS_TYPES and len(self.features) > 0:
-                        if float(params.get("z_offset", 0)) == 0.0:
-                            params["z_offset"] = self._get_current_top_height()
+            if action == "delete":
+                target_id = f_id
+                if not target_id and f_type:
+                    for fid in reversed(self.feature_order):
+                        if self.features[fid].feature_type == f_type:
+                            target_id = fid
+                            break
+                if target_id and target_id in self.features:
+                    feat = self.features.pop(target_id)
+                    if target_id in self.feature_order:
+                        self.feature_order.remove(target_id)
+                    feat.sync_refs(doc5, part5)
+                    feat.delete()
+                    logs.append(f"Удален элемент: {target_id}")
+                else:
+                    logs.append(f"Элемент для удаления не найден: {target_id or f_type}")
+                continue
 
-                    if feat_type in ("hole", "cut_box") and float(params.get("depth", 0)) > 0:
-                        params["z_offset"] = self._get_current_top_height()
+            if action == "update":
+                target_feat = self.features.get(f_id)
+                if target_feat and f_type and target_feat.feature_type != f_type:
+                    rect_group = ("plate", "box", "cube")
+                    if not (target_feat.feature_type in rect_group and f_type in rect_group):
+                        target_feat = None
 
-                    if feat_id in self.features:
-                        feat_id = f"{feat_type}_{len(self.features) + 1}"
+                if not target_feat and f_type:
+                    rect_group = ("plate", "box", "cube")
+                    for fid in reversed(self.feature_order):
+                        existing_t = self.features[fid].feature_type
+                        if existing_t == f_type or (existing_t in rect_group and f_type in rect_group):
+                            target_feat = self.features[fid]
+                            f_id = fid
+                            break
 
-                    feat_cls = self.FEATURE_MAP[feat_type]
-                    feat = feat_cls(feat_id, self.kompas)
-                    feat.build(params)
-                    self.features[feat_id] = feat
-                    self.history_stack.append(feat_id)
-                    results.append(f"построено {feat_id}")
+                if target_feat:
+                    target_feat.sync_refs(doc5, part5)
+                    if f_type in ("plate", "box", "cube"):
+                        target_feat.feature_type = f_type
+                    if target_feat.feature_type == "holes_corner":
+                        self._fill_base_plate_dims(params)
+                    ok, res_msg = target_feat.update(params)
+                    logs.append(res_msg)
+                    if not ok:
+                        return False, res_msg, logs
+                    continue
+                else:
+                    action = "build"
+                    f_id = f"{f_type}_{len(self.feature_order) + 1}"
 
-                elif action == "update":
-                    target_id = self._find_target_id(feat_id, feat_type)
-                    if not target_id:
-                        return {"status": "error", "message": f"Элемент {feat_id} не найден"}
-                    self.features[target_id].update(params)
-                    if target_id in ("plate", "box", "cube") and "corner_holes" in self.features:
-                        bw, bl = self._get_base_plate_dims()
-                        self.features["corner_holes"].update({
-                            "plate_width": bw,
-                            "plate_length": bl
-                        })
-                    results.append(f"обновлено {target_id}")
+            if not f_id:
+                f_id = f"{f_type}_{len(self.feature_order) + 1}"
 
-                elif action == "undo":
-                    if not self.history_stack:
-                        return {"status": "error", "message": "История шагов пуста"}
-                    last_id = self.history_stack.pop()
-                    if last_id in self.features:
-                        self.features[last_id].delete()
-                        del self.features[last_id]
-                    results.append(f"отменен шаг {last_id}")
+            if action == "build":
+                if f_id in self.features and self.features[f_id].feature_type == f_type:
+                    target_feat = self.features[f_id]
+                    target_feat.sync_refs(doc5, part5)
+                    ok, res_msg = target_feat.update(params)
+                    logs.append(res_msg)
+                    if not ok:
+                        return False, res_msg, logs
+                else:
+                    if f_id in self.features:
+                        f_id = f"{f_type}_{len(self.feature_order) + 1}"
 
-                elif action == "delete":
-                    target_id = self._find_target_id(feat_id, feat_type)
-                    if target_id:
-                        self.features[target_id].delete()
-                        del self.features[target_id]
-                        if target_id in self.history_stack:
-                            self.history_stack.remove(target_id)
-                        results.append(f"удалено {target_id}")
+                    sel = TreeScanner.get_selected_info(self.connector)
+                    has_selected_face = sel.get("selected_faces", 0) > 0
+                    top_h = self._get_current_top_height()
+
+                    boss_types = ("plate", "box", "cube", "cylinder", "tube", "polygon", "cone", "profile")
+                    cut_types = ("hole", "holes_circ", "cut_box", "slot")
+
+                    if f_type in boss_types and "z_offset" not in params and len(self.feature_order) > 0 and not has_selected_face:
+                        if top_h > 0:
+                            params["z_offset"] = top_h
+                    elif f_type in cut_types and "z_offset" not in params and not has_selected_face:
+                        if top_h > 0:
+                            params["z_offset"] = top_h
+                    elif f_type == "holes_corner":
+                        self._fill_base_plate_dims(params)
+
+                    feat = self._create_feature_instance(f_type, f_id)
+                    if not feat:
+                        return False, f"Неизвестный тип элемента: {f_type}", logs
+                    feat.sync_refs(doc5, part5)
+                    ok, res_msg = feat.build(params)
+                    if ok:
+                        self.features[f_id] = feat
+                        if f_id not in self.feature_order:
+                            self.feature_order.append(f_id)
+                        logs.append(res_msg)
                     else:
-                        native_ent = self.scanner.find_native_entity_by_name(feat_id)
-                        if native_ent is not None:
-                            self.kompas.doc3d_api5.ksDeleteEntity(native_ent)
-                            part = self.kompas.module5.ksPart(self.kompas.doc3d_api5.GetPart(-1))
-                            part.Update()
-                            results.append(f"удален элемент дерева {feat_id}")
-                        else:
-                            return {"status": "error", "message": f"Элемент {feat_id} не найден"}
+                        return False, res_msg, logs
 
-                elif action == "clear":
-                    for fid in reversed(list(self.history_stack)):
-                        if fid in self.features:
-                            self.features[fid].delete()
-                    self.features.clear()
-                    self.history_stack.clear()
-                    results.append("деталь полностью очищена")
+        return True, "Выполнено успешно", logs
 
-            except Exception as e:
-                return {"status": "error", "message": f"Ошибка выполнения: {str(e)}"}
+    def get_full_status(self):
+        st = self.connector.get_status()
+        if st.get("connected") and st.get("doc_open") and self.connector.doc3d_api5 and self.connector.part_api5:
+            self._sync_document_state(self.connector.doc3d_api5, self.connector.part_api5)
 
-        return {
-            "status": "ok",
-            "message": "Выполнено: " + ", ".join(results),
-            "context": self.scanner.get_compact_tree(self.features)
-        }
+        st["features"] = [
+            {
+                "id": fid,
+                "type": self.features[fid].feature_type,
+                "params": self.features[fid].params
+            }
+            for fid in self.feature_order if fid in self.features
+        ]
+        st["selection"] = TreeScanner.get_selected_info(self.connector)
+        st["native_tree"] = TreeScanner.scan_model_tree(self.connector)
+        return st
 
 
 engine = AzimutCadEngine()
 
 
-class RequestHandler(BaseHTTPRequestHandler):
+class AzimutRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
-    def _send_json(self, data: dict, code=200):
-        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+    def _send_json(self, status_code, data):
+        body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/status":
-            self._send_json(engine.get_status())
-        else:
-            self._send_json({"status": "error", "message": "Не найдено"}, 404)
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path == '/status':
+                st = engine.get_full_status()
+                self._send_json(200, st)
+            elif parsed.path == '/connect':
+                ok, msg = engine.connector.connect()
+                if ok:
+                    engine.connector.ensure_document()
+                st = engine.connector.get_status()
+                st["message"] = msg
+                st["features"] = []
+                st["selection"] = TreeScanner.get_selected_info(engine.connector)
+                st["native_tree"] = TreeScanner.scan_model_tree(engine.connector)
+                self._send_json(200 if ok else 500, st)
+            elif parsed.path == '/disconnect':
+                ok, msg = engine.connector.disconnect()
+                self._send_json(200, {"connected": False, "doc_open": False, "doc_name": "", "message": msg})
+            else:
+                self._send_json(404, {"error": "Маршрут не найден"})
+        except Exception as e:
+            self._send_json(500, {"connected": False, "doc_open": False, "doc_name": "", "message": str(e)})
 
     def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length).decode("utf-8")) if length > 0 else {}
+        parsed = urlparse(self.path)
+        length = int(self.headers.get('Content-Length', 0))
+        raw_body = self.rfile.read(length).decode('utf-8') if length > 0 else "{}"
 
-        if self.path == "/connect":
-            res = engine.kompas.connect()
-            if res["status"] == "connected":
-                engine.kompas.ensure_part_document()
-                engine.kompas.bring_to_front()
-            self._send_json(engine.get_status())
+        try:
+            payload = json.loads(raw_body)
+        except Exception as e:
+            self._send_json(400, {"success": False, "message": f"Ошибка JSON: {str(e)}"})
+            return
 
-        elif self.path == "/disconnect":
-            engine.kompas.is_connected = False
-            self._send_json(engine.get_status())
+        if parsed.path == '/execute':
+            try:
+                ok, msg, logs = engine.execute_commands(payload)
+                st = engine.get_full_status()
+                self._send_json(200 if ok else 500, {
+                    "success": ok,
+                    "message": msg,
+                    "logs": logs,
+                    "status": st
+                })
+            except Exception as e:
+                self._send_json(500, {
+                    "success": False,
+                    "message": f"Ошибка выполнения: {str(e)}",
+                    "logs": [],
+                    "status": engine.get_full_status()
+                })
+        else:
+            self._send_json(404, {"error": "Маршрут не найден"})
 
-        elif self.path == "/execute":
-            res = engine.execute_batch(body)
-            self._send_json(res)
 
-
-if __name__ == "__main__":
-    server = HTTPServer(("127.0.0.1", 8765), RequestHandler)
-    print("Сервер АЗИМУТ запущен: http://127.0.0.1:8765", flush=True)
+if __name__ == '__main__':
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+    pythoncom.CoInitialize()
+    free_port_8765()
+    server = HTTPServer(('127.0.0.1', 8765), AzimutRequestHandler)
+    print("AZIMUT Python Server started: http://127.0.0.1:8765", flush=True)
     server.serve_forever()

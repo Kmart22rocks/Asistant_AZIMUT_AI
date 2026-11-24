@@ -1,82 +1,146 @@
+import pythoncom
 from features.base_feature import BaseFeature
 
 
-class ChamferFeature(BaseFeature):
-    def build(self, params: dict) -> bool:
-        self.params = params
-        dist1 = float(params.get("distance", 2))
-        dist2 = float(params.get("distance2", dist1))
+class EdgeBaseFeature(BaseFeature):
+    def _get_edge_key(self, edge_ent):
+        try:
+            raw_edef = edge_ent.GetDefinition()
+            if raw_edef:
+                edef = self.m5.ksEdgeDefinition(
+                    raw_edef._oleobj_.QueryInterface(self.m5.ksEdgeDefinition.CLSID, pythoncom.IID_IDispatch)
+                )
+                v1_raw = edef.GetVertex(True)
+                v2_raw = edef.GetVertex(False)
+                if v1_raw and v2_raw:
+                    v1 = self.m5.ksVertexDefinition(
+                        v1_raw._oleobj_.QueryInterface(self.m5.ksVertexDefinition.CLSID, pythoncom.IID_IDispatch)
+                    )
+                    v2 = self.m5.ksVertexDefinition(
+                        v2_raw._oleobj_.QueryInterface(self.m5.ksVertexDefinition.CLSID, pythoncom.IID_IDispatch)
+                    )
+                    p1 = v1.GetPoint()
+                    p2 = v2.GetPoint()
+                    if isinstance(p1, tuple) and isinstance(p2, tuple) and len(p1) >= 4 and len(p2) >= 4:
+                        c1 = (round(p1[1], 3), round(p1[2], 3), round(p1[3], 3))
+                        c2 = (round(p2[1], 3), round(p2[2], 3), round(p2[3], 3))
+                        return tuple(sorted([c1, c2]))
+        except Exception:
+            pass
+        return getattr(edge_ent, "_oleobj_", id(edge_ent))
 
-        self.operation_entity = self._new_entity(self.OBJ_CHAMFER)
-        self.operation_entity.name = f"Фаска {dist1:g}x{dist2:g}"
-        chamfer_def = self.m5.ksChamferDefinition(self.operation_entity.GetDefinition())
-        chamfer_def.SetChamferParam(True, dist1, dist2)
+    def _collect_target_edges(self):
+        self.sync_refs()
+        selected = self._get_selected_entities()
+        edges = []
+        seen = set()
 
-        edge_array = self.m5.ksEntityCollection(chamfer_def.array())
-        selected_edges = self._get_selected_entities(self.OBJ_EDGE)
-        selected_faces = self._get_selected_entities(self.OBJ_FACE)
+        def add_unique_edge(e_ent):
+            if e_ent is None:
+                return
+            key = self._get_edge_key(e_ent)
+            if key not in seen:
+                seen.add(key)
+                edges.append(e_ent)
 
-        if selected_edges or selected_faces:
-            for e in selected_edges:
-                edge_array.Add(e)
-            for f in selected_faces:
-                edge_array.Add(f)
-        else:
-            all_edges = self.m5.ksEntityCollection(self.part.EntityCollection(self.OBJ_EDGE))
-            for i in range(all_edges.GetCount()):
-                edge_array.Add(all_edges.GetByIndex(i))
+        for ent in selected:
+            if ent.type == self.const.o3d_edge:
+                add_unique_edge(ent)
+            elif ent.type == self.const.o3d_face:
+                try:
+                    raw_fdef = ent.GetDefinition()
+                    if raw_fdef:
+                        fdef = self.m5.ksFaceDefinition(
+                            raw_fdef._oleobj_.QueryInterface(self.m5.ksFaceDefinition.CLSID, pythoncom.IID_IDispatch)
+                        )
+                        raw_ecol = fdef.EdgeCollection()
+                        if raw_ecol:
+                            ecol = self.m5.ksEntityCollection(
+                                raw_ecol._oleobj_.QueryInterface(self.m5.ksEntityCollection.CLSID, pythoncom.IID_IDispatch)
+                            )
+                            for i in range(ecol.GetCount()):
+                                add_unique_edge(self._wrap_entity(ecol.GetByIndex(i)))
+                except Exception:
+                    pass
 
-        self.operation_entity.Create()
-        self.part.Update()
-        return True
+        if not edges:
+            raw_all = self.part.EntityCollection(self.const.o3d_edge)
+            if raw_all:
+                all_col = self.m5.ksEntityCollection(
+                    raw_all._oleobj_.QueryInterface(self.m5.ksEntityCollection.CLSID, pythoncom.IID_IDispatch)
+                )
+                for i in range(all_col.GetCount()):
+                    add_unique_edge(self._wrap_entity(all_col.GetByIndex(i)))
 
-    def update(self, new_params: dict) -> bool:
-        self.params.update(new_params)
-        dist1 = float(self.params.get("distance", 2))
+        return edges
+
+
+class ChamferFeature(EdgeBaseFeature):
+    def build(self, params):
+        self.sync_refs()
+        self.params.update(params)
+        dist1 = float(self.params.get("distance", self.params.get("size", self.params.get("c", 2.0))))
         dist2 = float(self.params.get("distance2", dist1))
-        chamfer_def = self.m5.ksChamferDefinition(self.operation_entity.GetDefinition())
+
+        target_edges = self._collect_target_edges()
+        if not target_edges:
+            return False, "Не найдены ребра для построения фаски."
+
+        chamfer_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_chamfer))
+        raw_def = chamfer_ent.GetDefinition()
+        chamfer_def = self.m5.ksChamferDefinition(
+            raw_def._oleobj_.QueryInterface(self.m5.ksChamferDefinition.CLSID, pythoncom.IID_IDispatch)
+        )
+        chamfer_def.tangent = False
         chamfer_def.SetChamferParam(True, dist1, dist2)
-        self.operation_entity.name = f"Фаска {dist1:g}x{dist2:g}"
-        self.operation_entity.Update()
+
+        raw_arr = chamfer_def.array()
+        arr = self.m5.ksEntityCollection(
+            raw_arr._oleobj_.QueryInterface(self.m5.ksEntityCollection.CLSID, pythoncom.IID_IDispatch)
+        )
+        for edge in target_edges:
+            arr.Add(edge)
+
+        chamfer_ent.name = f"Фаска_{self.feature_id}"
+        ok = chamfer_ent.Create()
+        self.operation_entity = chamfer_ent
         self.part.Update()
-        return True
+        self.part.RebuildModel()
+        if not ok:
+            return False, f"Не удалось построить фаску {dist1} мм (проверьте допустимый размер фаски)"
+        return True, f"Выполнена фаска {dist1} мм (ребер: {len(target_edges)})"
 
 
-class FilletFeature(BaseFeature):
-    def build(self, params: dict) -> bool:
-        self.params = params
-        radius = float(params.get("radius", 2))
+class FilletFeature(EdgeBaseFeature):
+    def build(self, params):
+        self.sync_refs()
+        self.params.update(params)
+        radius = float(self.params.get("radius", self.params.get("r", 3.0)))
 
-        self.operation_entity = self._new_entity(self.OBJ_FILLET)
-        self.operation_entity.name = f"Скругление R{radius:g}"
-        fillet_def = self.m5.ksFilletDefinition(self.operation_entity.GetDefinition())
+        target_edges = self._collect_target_edges()
+        if not target_edges:
+            return False, "Не найдены ребра для скругления."
+
+        fillet_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_fillet))
+        raw_def = fillet_ent.GetDefinition()
+        fillet_def = self.m5.ksFilletDefinition(
+            raw_def._oleobj_.QueryInterface(self.m5.ksFilletDefinition.CLSID, pythoncom.IID_IDispatch)
+        )
         fillet_def.radius = radius
-        fillet_def.tangent = True
+        fillet_def.tangent = False
 
-        edge_array = self.m5.ksEntityCollection(fillet_def.array())
-        selected_edges = self._get_selected_entities(self.OBJ_EDGE)
-        selected_faces = self._get_selected_entities(self.OBJ_FACE)
+        raw_arr = fillet_def.array()
+        arr = self.m5.ksEntityCollection(
+            raw_arr._oleobj_.QueryInterface(self.m5.ksEntityCollection.CLSID, pythoncom.IID_IDispatch)
+        )
+        for edge in target_edges:
+            arr.Add(edge)
 
-        if selected_edges or selected_faces:
-            for e in selected_edges:
-                edge_array.Add(e)
-            for f in selected_faces:
-                edge_array.Add(f)
-        else:
-            all_edges = self.m5.ksEntityCollection(self.part.EntityCollection(self.OBJ_EDGE))
-            for i in range(all_edges.GetCount()):
-                edge_array.Add(all_edges.GetByIndex(i))
-
-        self.operation_entity.Create()
+        fillet_ent.name = f"Скругление_{self.feature_id}"
+        ok = fillet_ent.Create()
+        self.operation_entity = fillet_ent
         self.part.Update()
-        return True
-
-    def update(self, new_params: dict) -> bool:
-        self.params.update(new_params)
-        radius = float(self.params.get("radius", 2))
-        fillet_def = self.m5.ksFilletDefinition(self.operation_entity.GetDefinition())
-        fillet_def.radius = radius
-        self.operation_entity.name = f"Скругление R{radius:g}"
-        self.operation_entity.Update()
-        self.part.Update()
-        return True
+        self.part.RebuildModel()
+        if not ok:
+            return False, f"Не удалось построить скругление R{radius} мм (проверьте допустимый радиус)"
+        return True, f"Выполнено скругление R{radius} мм (ребер: {len(target_edges)})"

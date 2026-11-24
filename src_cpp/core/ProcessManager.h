@@ -5,7 +5,7 @@
 class ProcessManager : public QObject {
     Q_OBJECT
 public:
-    explicit ProcessManager(QObject *parent = nullptr);
+    explicit ProcessManager(QObject* parent = nullptr);
     ~ProcessManager() override;
 
     void startServices();
@@ -15,6 +15,7 @@ public:
         void pythonServerReady();
 
 private:
-    QProcess *m_pythonProcess;
-    QProcess *m_ollamaProcess;
+    QProcess* m_pythonProcess;
+    QProcess* m_ollamaProcess;
+    bool m_serverReadyEmitted = false;
 };

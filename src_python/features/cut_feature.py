@@ -3,166 +3,80 @@ from features.base_feature import BaseFeature
 
 
 class SingleHoleFeature(BaseFeature):
-    def build(self, params: dict) -> bool:
-        self.params = params
-        d = float(params.get("diameter", 10))
-        depth = float(params.get("depth", 0))
-        cx = float(params.get("x", 0))
-        cy = float(params.get("y", 0))
-        z_offset = float(params.get("z_offset", 0))
+    def build(self, params):
+        self.sync_refs()
+        self.params.update(params)
+        diameter = float(self.params.get("diameter", self.params.get("d", 10.0)))
+        cx = float(self.params.get("x", 0.0))
+        cy = float(self.params.get("y", 0.0))
+        through = bool(self.params.get("through", True))
+        depth = float(self.params.get("depth", self.params.get("h", 10.0)))
+        z_offset = float(self.params.get("z_offset", 0.0))
 
-        plane = self._get_work_plane(z_offset if depth > 0 else 0)
-        self.sketch_entity = self._new_entity(self.OBJ_SKETCH)
-        self.sketch_entity.name = f"Эскиз: Отверстие Ø{d:g}"
-        sketch_def = self.m5.ksSketchDefinition(self.sketch_entity.GetDefinition())
-        sketch_def.SetPlane(plane)
-        self.sketch_entity.Create()
-
-        self._draw_hole(sketch_def, cx, cy, d)
-
-        self.operation_entity = self._new_entity(self.OBJ_CUT_EXTRUDE)
-        self.operation_entity.name = f"Отверстие Ø{d:g} ({cx:g}; {cy:g})"
-        cut_def = self.m5.ksCutExtrusionDefinition(self.operation_entity.GetDefinition())
-        cut_def.SetSketch(self.sketch_entity)
-        if depth <= 0:
-            cut_def.SetSideParam(True, 1, 0, 0, False)
-            cut_def.SetSideParam(False, 1, 0, 0, False)
-        else:
-            cut_def.SetSideParam(False, 0, depth, 0, False)
-        self.operation_entity.Create()
-        self.part.Update()
-        return True
-
-    def update(self, new_params: dict) -> bool:
-        self.params.update(new_params)
-        d = float(self.params.get("diameter", 10))
-        cx = float(self.params.get("x", 0))
-        cy = float(self.params.get("y", 0))
-
-        sketch_def = self.m5.ksSketchDefinition(self.sketch_entity.GetDefinition())
-        self._draw_hole(sketch_def, cx, cy, d, clear_old=True)
-        self.sketch_entity.Update()
-        self.operation_entity.Update()
-        self.part.Update()
-        return True
-
-    def _draw_hole(self, sketch_def, cx: float, cy: float, d: float, clear_old=False):
-        sketch_edit = self.m5.ksDocument2D(sketch_def.BeginEdit())
-        if clear_old:
-            sketch_edit.ksDeleteObj(0)
-        sketch_edit.ksCircle(cx, cy, d / 2.0, 1)
+        plane = self._get_work_plane(z_offset)
+        sketch_ent, sketch_def = self._create_sketch(plane)
+        doc2d = self._begin_sketch_edit(sketch_def)
+        doc2d.ksCircle(cx, cy, diameter / 2.0, 1)
         sketch_def.EndEdit()
+
+        self._extrude_cut(sketch_ent, depth, through, f"Отверстие_{self.feature_id}")
+        mode_str = "сквозное" if through else f"глубина {depth} мм"
+        return True, f"Выполнено отверстие Ø{diameter} мм ({mode_str})"
 
 
 class CircularHolesFeature(BaseFeature):
-    def build(self, params: dict) -> bool:
-        self.params = params
-        count = int(params.get("count", 6))
-        d = float(params.get("diameter", 8))
-        circle_d = float(params.get("circle_diameter", 60))
-        cx = float(params.get("x", 0))
-        cy = float(params.get("y", 0))
+    def build(self, params):
+        self.sync_refs()
+        self.params.update(params)
+        count = max(1, int(self.params.get("count", 6)))
+        diameter = float(self.params.get("diameter", self.params.get("d", 8.0)))
+        circle_d = float(self.params.get("circle_diameter", self.params.get("pitch_diameter", 60.0)))
+        through = bool(self.params.get("through", True))
+        depth = float(self.params.get("depth", 10.0))
+        z_offset = float(self.params.get("z_offset", 0.0))
 
-        plane = self.part.GetDefaultEntity(self.DEFAULT_PLANE)
-        self.sketch_entity = self._new_entity(self.OBJ_SKETCH)
-        self.sketch_entity.name = f"Эскиз: {count} отв. Ø{d:g}"
-        sketch_def = self.m5.ksSketchDefinition(self.sketch_entity.GetDefinition())
-        sketch_def.SetPlane(plane)
-        self.sketch_entity.Create()
+        plane = self._get_work_plane(z_offset)
+        sketch_ent, sketch_def = self._create_sketch(plane)
+        doc2d = self._begin_sketch_edit(sketch_def)
 
-        self._draw_pattern(sketch_def, cx, cy, count, d, circle_d)
-
-        self.operation_entity = self._new_entity(self.OBJ_CUT_EXTRUDE)
-        self.operation_entity.name = f"Массив {count} отв. Ø{d:g} на Ø{circle_d:g}"
-        cut_def = self.m5.ksCutExtrusionDefinition(self.operation_entity.GetDefinition())
-        cut_def.SetSketch(self.sketch_entity)
-        cut_def.SetSideParam(True, 1, 0, 0, False)
-        cut_def.SetSideParam(False, 1, 0, 0, False)
-        self.operation_entity.Create()
-        self.part.Update()
-        return True
-
-    def update(self, new_params: dict) -> bool:
-        self.params.update(new_params)
-        count = int(self.params.get("count", 6))
-        d = float(self.params.get("diameter", 8))
-        circle_d = float(self.params.get("circle_diameter", 60))
-        cx = float(self.params.get("x", 0))
-        cy = float(self.params.get("y", 0))
-
-        sketch_def = self.m5.ksSketchDefinition(self.sketch_entity.GetDefinition())
-        self._draw_pattern(sketch_def, cx, cy, count, d, circle_d, clear_old=True)
-        self.sketch_entity.Update()
-        self.operation_entity.Update()
-        self.part.Update()
-        return True
-
-    def _draw_pattern(self, sketch_def, cx: float, cy: float, count: int, d: float, circle_d: float, clear_old=False):
-        sketch_edit = self.m5.ksDocument2D(sketch_def.BeginEdit())
-        if clear_old:
-            sketch_edit.ksDeleteObj(0)
-        R = circle_d / 2.0
-        r = d / 2.0
+        pitch_r = circle_d / 2.0
+        hole_r = diameter / 2.0
         for i in range(count):
             ang = 2.0 * math.pi * i / count
-            sketch_edit.ksCircle(cx + R * math.cos(ang), cy + R * math.sin(ang), r, 1)
+            hx = pitch_r * math.cos(ang)
+            hy = pitch_r * math.sin(ang)
+            doc2d.ksCircle(hx, hy, hole_r, 1)
         sketch_def.EndEdit()
+
+        self._extrude_cut(sketch_ent, depth, through, f"ОтверстияПоОкружности_{self.feature_id}")
+        return True, f"Выполнено {count} отверстий Ø{diameter} мм по окружности Ø{circle_d} мм"
 
 
 class CutBoxFeature(BaseFeature):
-    def build(self, params: dict) -> bool:
-        self.params = params
-        w = float(params.get("width", 20))
-        l = float(params.get("length", 20))
-        depth = float(params.get("depth", 0))
-        cx = float(params.get("x", 0))
-        cy = float(params.get("y", 0))
-        z_offset = float(params.get("z_offset", 0))
+    def build(self, params):
+        self.sync_refs()
+        self.params.update(params)
+        width = float(self.params.get("width", self.params.get("w", 20.0)))
+        length = float(self.params.get("length", self.params.get("l", 20.0)))
+        depth = float(self.params.get("depth", self.params.get("height", 10.0)))
+        cx = float(self.params.get("x", 0.0))
+        cy = float(self.params.get("y", 0.0))
+        through = bool(self.params.get("through", False))
+        z_offset = float(self.params.get("z_offset", 0.0))
 
-        plane = self._get_work_plane(z_offset if depth > 0 else 0)
-        self.sketch_entity = self._new_entity(self.OBJ_SKETCH)
-        self.sketch_entity.name = f"Эскиз: Паз {w:g}x{l:g}"
-        sketch_def = self.m5.ksSketchDefinition(self.sketch_entity.GetDefinition())
-        sketch_def.SetPlane(plane)
-        self.sketch_entity.Create()
+        plane = self._get_work_plane(z_offset)
+        sketch_ent, sketch_def = self._create_sketch(plane)
+        doc2d = self._begin_sketch_edit(sketch_def)
 
-        self._draw_rect(sketch_def, cx, cy, w, l)
-
-        self.operation_entity = self._new_entity(self.OBJ_CUT_EXTRUDE)
-        self.operation_entity.name = f"Вырез {w:g}x{l:g}"
-        cut_def = self.m5.ksCutExtrusionDefinition(self.operation_entity.GetDefinition())
-        cut_def.SetSketch(self.sketch_entity)
-        if depth <= 0:
-            cut_def.SetSideParam(True, 1, 0, 0, False)
-            cut_def.SetSideParam(False, 1, 0, 0, False)
-        else:
-            cut_def.SetSideParam(False, 0, depth, 0, False)
-        self.operation_entity.Create()
-        self.part.Update()
-        return True
-
-    def update(self, new_params: dict) -> bool:
-        self.params.update(new_params)
-        w = float(self.params["width"])
-        l = float(self.params["length"])
-        cx = float(self.params.get("x", 0))
-        cy = float(self.params.get("y", 0))
-
-        sketch_def = self.m5.ksSketchDefinition(self.sketch_entity.GetDefinition())
-        self._draw_rect(sketch_def, cx, cy, w, l, clear_old=True)
-        self.sketch_entity.Update()
-        self.operation_entity.Update()
-        self.part.Update()
-        return True
-
-    def _draw_rect(self, sketch_def, cx: float, cy: float, w: float, l: float, clear_old=False):
-        sketch_edit = self.m5.ksDocument2D(sketch_def.BeginEdit())
-        if clear_old:
-            sketch_edit.ksDeleteObj(0)
-        x1, y1 = cx - w / 2.0, cy - l / 2.0
-        x2, y2 = cx + w / 2.0, cy + l / 2.0
-        sketch_edit.ksLineSeg(x1, y1, x2, y1, 1)
-        sketch_edit.ksLineSeg(x2, y1, x2, y2, 1)
-        sketch_edit.ksLineSeg(x2, y2, x1, y2, 1)
-        sketch_edit.ksLineSeg(x1, y2, x1, y1, 1)
+        hw = width / 2.0
+        hl = length / 2.0
+        x1, y1 = cx - hw, cy - hl
+        x2, y2 = cx + hw, cy + hl
+        doc2d.ksLineSeg(x1, y1, x2, y1, 1)
+        doc2d.ksLineSeg(x2, y1, x2, y2, 1)
+        doc2d.ksLineSeg(x2, y2, x1, y2, 1)
+        doc2d.ksLineSeg(x1, y2, x1, y1, 1)
         sketch_def.EndEdit()
+
+        self._extrude_cut(sketch_ent, depth, through, f"Вырез_{self.feature_id}")
+        return True, f"Выполнен прямоугольный вырез {width}x{length} мм"
