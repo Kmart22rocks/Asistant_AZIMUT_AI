@@ -1,5 +1,4 @@
 #pragma once
-
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -11,7 +10,6 @@ class OllamaClient : public QObject {
     Q_OBJECT
 public:
     explicit OllamaClient(QObject *parent = nullptr);
-
     void checkConnection();
     void setModelName(const QString &model);
     QString modelName() const;
@@ -33,12 +31,16 @@ private slots:
 
 private:
     QString buildSystemPrompt() const;
+    void warmupModel();
+    bool tryHandleFastPath(const QString &userPrompt);
 
     QNetworkAccessManager *m_nam;
     QString m_baseUrl;
     QString m_modelName;
     QTimer *m_pingTimer;
     bool m_isOnline;
+    bool m_isBusy;
+    bool m_modelWarmedUp;
     QJsonObject m_currentContext;
     QJsonArray m_history;
     QString m_lastUserPrompt;
