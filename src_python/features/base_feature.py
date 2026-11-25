@@ -1,12 +1,9 @@
 import pythoncom
-
-
 class BaseFeature:
     PLANE_XY = 1
     PLANE_XZ = 2
     PLANE_YZ = 3
     DEFAULT_PLANE = PLANE_XZ
-
     def __init__(self, feature_id, kompas_connector):
         self.id = feature_id
         self.feature_id = feature_id
@@ -18,15 +15,12 @@ class BaseFeature:
         self.plane_entity = None
         self.used_selected_face = False
         self.sync_refs()
-
     @property
     def extrusion_entity(self):
         return self.operation_entity
-
     @extrusion_entity.setter
     def extrusion_entity(self, val):
         self.operation_entity = val
-
     def sync_refs(self, doc5=None, part5=None):
         self.api5 = self.connector.api5
         self.m5 = self.connector.module5
@@ -34,7 +28,6 @@ class BaseFeature:
         self.const = self.connector.const
         self.doc3d = doc5 if doc5 is not None else self.connector.doc3d_api5
         self.part = part5 if part5 is not None else self.connector.part_api5
-
     def _wrap_entity(self, raw_obj):
         if raw_obj is None:
             return None
@@ -45,7 +38,6 @@ class BaseFeature:
             return self.m5.ksEntity(ole.QueryInterface(self.m5.ksEntity.CLSID, pythoncom.IID_IDispatch))
         except Exception:
             return None
-
     def _get_selected_entities(self, target_type=None):
         self.sync_refs()
         entities = []
@@ -67,34 +59,30 @@ class BaseFeature:
         except Exception:
             pass
         return entities
-
     def _get_work_plane(self, z_offset=0.0):
         self.sync_refs()
         selected_faces = self._get_selected_entities(target_type=self.const.o3d_face)
         if selected_faces:
             self.used_selected_face = True
             return selected_faces[0]
-
         self.used_selected_face = False
         base_plane = self._wrap_entity(self.part.GetDefaultEntity(self.DEFAULT_PLANE))
         offset_val = float(z_offset)
         if abs(offset_val) < 1e-5:
             return base_plane
-
         plane_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_planeOffset))
         raw_def = plane_ent.GetDefinition()
         plane_def = self.m5.ksPlaneOffsetDefinition(
             raw_def._oleobj_.QueryInterface(self.m5.ksPlaneOffsetDefinition.CLSID, pythoncom.IID_IDispatch)
         )
-        plane_def.direction = False
-        plane_def.offset = offset_val
+        plane_def.direction = True if offset_val > 0 else False
+        plane_def.offset = abs(offset_val)
         plane_def.SetPlane(base_plane)
         plane_ent.name = f"Плоскость_{self.feature_id}"
         plane_ent.hidden = True
         plane_ent.Create()
         self.plane_entity = plane_ent
         return plane_ent
-
     def _create_sketch(self, plane_entity, sketch_name=None):
         self.sync_refs()
         sketch_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_sketch))
@@ -107,13 +95,11 @@ class BaseFeature:
         sketch_ent.Create()
         self.sketch_entity = sketch_ent
         return sketch_ent, sketch_def
-
     def _begin_sketch_edit(self, sketch_def):
         raw_doc2d = sketch_def.BeginEdit()
         return self.m5.ksDocument2D(
             raw_doc2d._oleobj_.QueryInterface(self.m5.ksDocument2D.CLSID, pythoncom.IID_IDispatch)
         )
-
     def _extrude_boss(self, sketch_ent, height, op_name, draft_angle=0.0, draft_outward=False):
         self.sync_refs()
         extr_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_bossExtrusion))
@@ -121,15 +107,11 @@ class BaseFeature:
         extr_def = self.m5.ksBossExtrusionDefinition(
             raw_def._oleobj_.QueryInterface(self.m5.ksBossExtrusionDefinition.CLSID, pythoncom.IID_IDispatch)
         )
-        h_val = float(height)
+        h_val = abs(float(height))
         ang_val = float(draft_angle)
         out_val = bool(draft_outward)
-
-        if self.used_selected_face:
-            extr_def.directionType = self.const.dtNormal
-        else:
-            extr_def.directionType = self.const.dtReverse
-
+        dir_sign = -1 if float(self.params.get("direction", 1)) < 0 or float(height) < 0 else 1
+        extr_def.directionType = self.const.dtNormal if dir_sign > 0 else self.const.dtReverse
         extr_def.SetSideParam(True, self.const.etBlind, h_val, ang_val, out_val)
         extr_def.SetSideParam(False, self.const.etBlind, h_val, ang_val, out_val)
         extr_def.SetSketch(sketch_ent)
@@ -139,7 +121,6 @@ class BaseFeature:
         self.part.Update()
         self.part.RebuildModel()
         return extr_ent
-
     def _extrude_cut(self, sketch_ent, depth, through, op_name):
         self.sync_refs()
         cut_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_cutExtrusion))
@@ -152,7 +133,7 @@ class BaseFeature:
             cut_def.SetSideParam(True, self.const.etThroughAll, 0, 0, False)
             cut_def.SetSideParam(False, self.const.etThroughAll, 0, 0, False)
         else:
-            d_val = float(depth)
+            d_val = abs(float(depth))
             cut_def.SetSideParam(True, self.const.etBlind, d_val, 0, False)
             cut_def.SetSideParam(False, self.const.etBlind, d_val, 0, False)
         cut_def.SetSketch(sketch_ent)
@@ -162,7 +143,6 @@ class BaseFeature:
         self.part.Update()
         self.part.RebuildModel()
         return cut_ent
-
     def is_alive(self):
         if self.operation_entity is None:
             return False
@@ -170,7 +150,6 @@ class BaseFeature:
             return bool(self.operation_entity.IsCreated())
         except Exception:
             return False
-
     def delete(self):
         self.sync_refs()
         for ent_attr in ("operation_entity", "sketch_entity", "plane_entity"):
@@ -195,7 +174,6 @@ class BaseFeature:
         except Exception:
             pass
         return True
-
     def update(self, params):
         merged = dict(self.params)
         merged.update(params)
