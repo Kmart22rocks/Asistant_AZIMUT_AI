@@ -9,7 +9,6 @@ from win32com.client import gencache
 import win32gui
 import win32con
 
-
 class KompasConnector:
     def __init__(self):
         self.api5 = None
@@ -90,7 +89,6 @@ class KompasConnector:
         pythoncom.CoInitialize()
         try:
             self._load_typelibs()
-
             raw_api5 = None
             try:
                 raw_api5 = win32com.client.GetActiveObject("Kompas.Application.5")
@@ -107,11 +105,9 @@ class KompasConnector:
                                     break
                             except Exception:
                                 pass
-
             if raw_api5 is None:
                 self.is_connected = False
                 return False, "Не удалось запустить или найти КОМПАС-3D."
-
             last_err = None
             for _ in range(25):
                 try:
@@ -122,12 +118,10 @@ class KompasConnector:
                         ole5.QueryInterface(self.module5.KompasObject.CLSID, pythoncom.IID_IDispatch)
                     )
                     self.api5.Visible = True
-
                     try:
                         raw_api7 = win32com.client.GetActiveObject("Kompas.Application.7")
                     except Exception:
                         raw_api7 = win32com.client.Dispatch("Kompas.Application.7")
-
                     ole7 = getattr(raw_api7, "_oleobj_", None)
                     if ole7 is None and hasattr(raw_api7, "_dispobj_"):
                         ole7 = raw_api7._dispobj_._oleobj_
@@ -142,7 +136,6 @@ class KompasConnector:
                 except Exception as e:
                     last_err = e
                     time.sleep(0.5)
-
             self.is_connected = False
             return False, f"Ошибка инициализации API КОМПАС-3D: {str(last_err)}"
         except Exception as e:
@@ -186,21 +179,18 @@ class KompasConnector:
             ok, msg = self.connect()
             if not ok:
                 return None, None, msg
-
         for _ in range(15):
             try:
                 doc7 = self.api7.ActiveDocument
                 if doc7 is None or doc7.DocumentType != 4:
                     docs = self.api7.Documents
                     doc7 = docs.Add(4, True)
-
                 if self._refresh_active_doc_pointers():
                     self.bring_to_front()
                     return self.doc3d_api5, self.part_api5, "Документ 3D готов"
                 time.sleep(0.4)
             except Exception:
                 time.sleep(0.4)
-
         ok, msg = self.connect()
         if not ok:
             return None, None, msg
@@ -221,7 +211,7 @@ class KompasConnector:
                 self.part_api5.name = clean_name
                 self.part_api5.Update()
             self.bring_to_front()
-            label = f" «{project_name}»" if project_name else ""
+            label = f" \"{project_name}\"" if project_name else ""
             return True, f"Создан новый 3D-проект{label} (.m3d)"
         except Exception as e:
             return False, f"Ошибка создания нового проекта: {str(e)}"
@@ -230,22 +220,18 @@ class KompasConnector:
         doc5, part5, msg = self.ensure_document()
         if not doc5 or not self.doc_api7:
             return False, msg
-
         default_name = suggested_name.strip() if suggested_name else ""
         if not default_name:
             doc_title = getattr(self.doc_api7, "Name", "") or "Деталь"
             default_name = doc_title
         if not default_name.lower().endswith(".m3d"):
             default_name += ".m3d"
-
         if part5 and suggested_name:
             part5.name = suggested_name.replace(".m3d", "").strip()
             part5.Update()
-
         self.bring_to_front()
         hwnd = self._get_kompas_hwnd()
         initial_dir = os.path.expanduser("~\\Documents")
-
         try:
             flags = win32con.OFN_EXPLORER | win32con.OFN_OVERWRITEPROMPT | win32con.OFN_PATHMUSTEXIST
             file_path, _, _ = win32gui.GetSaveFileNameW(
@@ -260,7 +246,6 @@ class KompasConnector:
             )
             if not file_path:
                 return False, "Сохранение отменено пользователем"
-
             saved = False
             try:
                 saved = bool(self.doc_api7.SaveAs(file_path))
@@ -268,7 +253,6 @@ class KompasConnector:
                 saved = False
             if not saved and self.doc3d_api5:
                 saved = bool(self.doc3d_api5.SaveAs(file_path))
-
             return True, f"Проект успешно сохранен: {file_path}"
         except Exception as e:
             return False, f"Сохранение отменено или возникла ошибка: {str(e)}"
@@ -280,12 +264,10 @@ class KompasConnector:
             doc7 = self.api7.ActiveDocument
             if doc7 is None:
                 return False, "В КОМПАС-3D нет открытого проекта для удаления"
-
             doc_name = getattr(doc7, "Name", "")
             doc_path = getattr(doc7, "PathName", "")
             doc7.Close(False)
             self._refresh_active_doc_pointers()
-
             removed_from_disk = False
             if doc_path and os.path.exists(doc_path) and doc_path.lower().endswith(".m3d"):
                 try:
@@ -302,10 +284,9 @@ class KompasConnector:
                         removed_from_disk = True
                     except Exception:
                         pass
-
             if removed_from_disk:
-                return True, f"Проект «{doc_name or target_name}» закрыт и удален с диска"
-            return True, f"Проект «{doc_name or 'Деталь'}» закрыт без сохранения"
+                return True, f"Проект \"{doc_name or target_name}\" закрыт и удален с диска"
+            return True, f"Проект \"{doc_name or 'Деталь'}\" закрыт без сохранения"
         except Exception as e:
             return False, f"Ошибка удаления проекта: {str(e)}"
 

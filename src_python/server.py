@@ -18,6 +18,20 @@ from features.profile_shapes_feature import RectTubeFeature, LProfileFeature, UP
 from features.kinematic_feature import TorusFeature, DomeFeature, SpringFeature, GearFeature, FlangeFeature, RibFeature
 from features.machining_feature import CounterboreFeature, CountersinkFeature, GrooveFeature, CrossSlotFeature, TSlotFeature
 from features.standard_part_feature import StandardPartFeature
+
+def clean_text(val):
+    if not isinstance(val, str):
+        val = str(val)
+    return (
+        val.replace("—", "-")
+        .replace("–", "-")
+        .replace("−", "-")
+        .replace("«", "\"")
+        .replace("»", "\"")
+        .replace("“", "\"")
+        .replace("”", "\"")
+    )
+
 def free_port_8765():
     try:
         out = subprocess.check_output(["netstat", "-ano"], text=True, stderr=subprocess.DEVNULL)
@@ -30,6 +44,7 @@ def free_port_8765():
                     subprocess.run(["taskkill", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         pass
+
 class AzimutCadEngine:
     BOSS_TYPES = (
         "plate", "box", "cube", "cylinder", "tube", "polygon", "cone", "profile", "shaft", "sphere",
@@ -41,12 +56,14 @@ class AzimutCadEngine:
         "hole", "holes_circ", "holes_grid", "cut_box", "slot",
         "counterbore", "countersink", "groove", "cross_slot", "t_slot"
     )
+
     def __init__(self):
         self.connector = KompasConnector()
         self.features = {}
         self.feature_order = []
         self.active_doc_name = ""
         self.active_part_ptr = None
+
     def _create_feature_instance(self, f_type, f_id):
         mapping = {
             "plate": PlateFeature,
@@ -100,6 +117,7 @@ class AzimutCadEngine:
             feat.feature_type = f_type
             return feat
         return None
+
     def _sync_document_state(self, doc5, part5):
         try:
             doc_info = self.connector.get_status()
@@ -120,6 +138,7 @@ class AzimutCadEngine:
             self.features.pop(fid, None)
             if fid in self.feature_order:
                 self.feature_order.remove(fid)
+
     def _get_feature_bounds(self, feat):
         p = feat.params
         cx = float(p.get("x", 0.0))
@@ -137,6 +156,7 @@ class AzimutCadEngine:
             top_y = y0
             bottom_y = y0 - h
         return {"center_x": cx, "center_z": cz, "bottom_y": bottom_y, "top_y": top_y, "center_y": (bottom_y + top_y) / 2.0}
+
     def _get_reference_boss(self, target_id=""):
         if target_id and target_id in self.features:
             return self.features[target_id]
@@ -145,6 +165,7 @@ class AzimutCadEngine:
             if feat and feat.feature_type in self.BOSS_TYPES:
                 return feat
         return None
+
     def _fill_base_plate_dims(self, params):
         if "plate_width" in params and "plate_length" in params:
             return
@@ -154,8 +175,9 @@ class AzimutCadEngine:
                 params.setdefault("plate_width", feat.params.get("width", 100.0))
                 params.setdefault("plate_length", feat.params.get("length", 100.0))
                 return
+
     def execute_commands(self, payload):
-        print(f"Выполнение команд ИИ: {json.dumps(payload, ensure_ascii=False)}", flush=True)
+        print(f"Выполнение команд: {json.dumps(payload, ensure_ascii=False)}", flush=True)
         commands = payload.get("commands", [])
         logs = []
         for cmd in commands:
@@ -168,6 +190,7 @@ class AzimutCadEngine:
             if action == "doc_new" or f_type == "doc_new":
                 proj_name = params.get("name", params.get("filename", ""))
                 ok, res_msg = self.connector.create_new_project(proj_name)
+                res_msg = clean_text(res_msg)
                 if ok:
                     self.features.clear()
                     self.feature_order.clear()
@@ -178,6 +201,7 @@ class AzimutCadEngine:
             if action == "doc_save" or f_type == "doc_save":
                 proj_name = params.get("name", params.get("filename", ""))
                 ok, res_msg = self.connector.save_project_dialog(proj_name)
+                res_msg = clean_text(res_msg)
                 logs.append(res_msg)
                 if not ok:
                     return False, res_msg, logs
@@ -185,6 +209,7 @@ class AzimutCadEngine:
             if action == "doc_delete" or f_type == "doc_delete":
                 proj_name = params.get("name", params.get("filename", ""))
                 ok, res_msg = self.connector.delete_project(proj_name)
+                res_msg = clean_text(res_msg)
                 if ok:
                     self.features.clear()
                     self.feature_order.clear()
@@ -194,7 +219,7 @@ class AzimutCadEngine:
                 continue
             doc5, part5, msg = self.connector.ensure_document()
             if not doc5 or not part5:
-                return False, msg, logs
+                return False, clean_text(msg), logs
             self._sync_document_state(doc5, part5)
             sel = TreeScanner.get_selected_info(self.connector)
             has_selected_face = sel.get("selected_faces", 0) > 0
@@ -261,6 +286,7 @@ class AzimutCadEngine:
                     if target_feat.feature_type == "holes_corner":
                         self._fill_base_plate_dims(params)
                     ok, res_msg = target_feat.update(params)
+                    res_msg = clean_text(res_msg)
                     logs.append(res_msg)
                     if not ok:
                         return False, res_msg, logs
@@ -275,6 +301,7 @@ class AzimutCadEngine:
                     target_feat = self.features[f_id]
                     target_feat.sync_refs(doc5, part5)
                     ok, res_msg = target_feat.update(params)
+                    res_msg = clean_text(res_msg)
                     logs.append(res_msg)
                     if not ok:
                         return False, res_msg, logs
@@ -322,6 +349,7 @@ class AzimutCadEngine:
                         return False, f"Неизвестный тип элемента: {f_type}", logs
                     feat.sync_refs(doc5, part5)
                     ok, res_msg = feat.build(params)
+                    res_msg = clean_text(res_msg)
                     if ok:
                         self.features[f_id] = feat
                         if f_id not in self.feature_order:
@@ -330,6 +358,7 @@ class AzimutCadEngine:
                     else:
                         return False, res_msg, logs
         return True, "Выполнено успешно", logs
+
     def get_full_status(self):
         st = self.connector.get_status()
         if st.get("connected") and st.get("doc_open") and self.connector.doc3d_api5 and self.connector.part_api5:
@@ -346,10 +375,13 @@ class AzimutCadEngine:
         st["selection"] = TreeScanner.get_selected_info(self.connector)
         st["native_tree"] = TreeScanner.scan_model_tree(self.connector)
         return st
+
 engine = AzimutCadEngine()
+
 class AzimutRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
+
     def _send_json(self, status_code, data):
         body = json.dumps(data, ensure_ascii=False).encode('utf-8')
         self.send_response(status_code)
@@ -357,6 +389,7 @@ class AzimutRequestHandler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         try:
@@ -368,18 +401,19 @@ class AzimutRequestHandler(BaseHTTPRequestHandler):
                 if ok:
                     engine.connector.ensure_document()
                 st = engine.connector.get_status()
-                st["message"] = msg
+                st["message"] = clean_text(msg)
                 st["features"] = []
                 st["selection"] = TreeScanner.get_selected_info(engine.connector)
                 st["native_tree"] = TreeScanner.scan_model_tree(engine.connector)
                 self._send_json(200 if ok else 500, st)
             elif parsed.path == '/disconnect':
                 ok, msg = engine.connector.disconnect()
-                self._send_json(200, {"connected": False, "doc_open": False, "doc_name": "", "message": msg})
+                self._send_json(200, {"connected": False, "doc_open": False, "doc_name": "", "message": clean_text(msg)})
             else:
                 self._send_json(404, {"error": "Маршрут не найден"})
         except Exception as e:
-            self._send_json(500, {"connected": False, "doc_open": False, "doc_name": "", "message": str(e)})
+            self._send_json(500, {"connected": False, "doc_open": False, "doc_name": "", "message": clean_text(str(e))})
+
     def do_POST(self):
         parsed = urlparse(self.path)
         length = int(self.headers.get('Content-Length', 0))
@@ -395,19 +429,20 @@ class AzimutRequestHandler(BaseHTTPRequestHandler):
                 st = engine.get_full_status()
                 self._send_json(200 if ok else 500, {
                     "success": ok,
-                    "message": msg,
+                    "message": clean_text(msg),
                     "logs": logs,
                     "status": st
                 })
             except Exception as e:
                 self._send_json(500, {
                     "success": False,
-                    "message": f"Ошибка выполнения: {str(e)}",
+                    "message": f"Ошибка выполнения: {clean_text(str(e))}",
                     "logs": [],
                     "status": engine.get_full_status()
                 })
         else:
             self._send_json(404, {"error": "Маршрут не найден"})
+
 if __name__ == '__main__':
     sys.stdout.reconfigure(encoding='utf-8')
     sys.stderr.reconfigure(encoding='utf-8')
