@@ -3,6 +3,7 @@
 #include <QNetworkRequest>
 #include <QUrl>
 #include <QRegularExpression>
+#include <cmath>
 
 static QString sanitizeText(QString text) {
     return text.replace(QString::fromUtf8("—"), "-")
@@ -74,6 +75,303 @@ static bool hasValidParam(const QJsonObject &params, const QString &key) {
     return true;
 }
 
+static QList<double> extractUserNumbers(const QString &text) {
+    QList<double> nums;
+    QRegularExpression rx("(?<!\\d)\\d+(?:[.,]\\d+)?(?!\\d)");
+    QRegularExpressionMatchIterator it = rx.globalMatch(text);
+    while (it.hasNext()) {
+        QRegularExpressionMatch m = it.next();
+        double v = m.captured(0).replace(',', '.').toDouble();
+        nums.append(v);
+    }
+    return nums;
+}
+
+static bool isNumberInUserList(double val, const QList<double> &userNums) {
+    for (double u : userNums) {
+        if (std::abs(val - u) < 1e-2) return true;
+        if (std::abs(val - u * 2.0) < 1e-2) return true;
+        if (std::abs(val * 2.0 - u) < 1e-2) return true;
+    }
+    return false;
+}
+
+static bool isMoveCommandPrompt(const QString &lowerText) {
+    return lowerText.contains("опуст") ||
+           lowerText.contains("подним") ||
+           lowerText.contains("перемест") ||
+           lowerText.contains("сдвин") ||
+           lowerText.contains("подвин") ||
+           lowerText.contains("перенес") ||
+           lowerText.contains("вниз") ||
+           lowerText.contains("вверх") ||
+           lowerText.contains("вправ") ||
+           lowerText.contains("влев") ||
+           lowerText.contains("вперед") ||
+           lowerText.contains("вперёд") ||
+           lowerText.contains("назад");
+}
+
+static bool validateAndCleanBuildParams(
+    QString &type,
+    QJsonObject &params,
+    const QString &dialogText,
+    const QString &lastPrompt,
+    QString &missingReply)
+{
+    QString lowerDialog = dialogText.toLower();
+    QString lowerLast = lastPrompt.toLower();
+    QList<double> userNums = extractUserNumbers(dialogText);
+    QList<double> lastNums = extractUserNumbers(lastPrompt);
+
+    if (lowerLast.contains("фаск")) {
+        type = "chamfer";
+        params.remove("width");
+        params.remove("length");
+        params.remove("height");
+        if (!lastNums.isEmpty()) {
+            params["size"] = lastNums.first();
+        }
+    } else if (lowerLast.contains("скругл")) {
+        type = "fillet";
+        params.remove("width");
+        params.remove("length");
+        params.remove("height");
+        if (!lastNums.isEmpty()) {
+            params["radius"] = lastNums.first();
+        }
+    } else if (lowerLast.contains("оболочк")) {
+        type = "shell";
+        if (!lastNums.isEmpty()) {
+            params["thickness"] = lastNums.first();
+        }
+    } else if (lowerDialog.contains("куб") && (type == "plate" || type == "box" || type == "cube")) {
+        type = "cube";
+    }
+
+    if (type == "appearance" || type == "color" || type == "material") {
+        return true;
+    }
+
+    const QStringList dimKeys = {
+        "size", "width", "length", "height", "diameter", "d", "d1", "d2",
+        "radius", "r", "depth", "thickness", "wall", "t", "step", "step_x", "step_z",
+        "offset", "inner_diameter", "bore", "outer_d", "inner_d", "circle_d", "pcd",
+        "module", "m", "teeth", "wire_d", "pitch"
+    };
+
+    for (const QString &k : dimKeys) {
+        if (type == "holes_corner" && (k == "width" || k == "length" || k == "offset")) {
+            continue;
+        }
+        if (params.contains(k) && params.value(k).isDouble()) {
+            double v = params.value(k).toDouble();
+            if (!isNumberInUserList(v, userNums)) {
+                params.remove(k);
+            }
+        }
+    }
+
+    if (type == "cube") {
+        if (userNums.isEmpty()) {
+            missingReply = "Укажите длину стороны куба (в мм).";
+            return false;
+        }
+        double side = userNums.last();
+        params["size"] = side;
+        params["width"] = side;
+        params["length"] = side;
+        params["height"] = side;
+        return true;
+    }
+
+    if (type == "plate" || type == "box") {
+        bool isSquare = lowerDialog.contains("квадрат");
+        int minNums = isSquare ? 2 : 3;
+        QStringList miss;
+        if (!hasValidParam(params, "length")) miss << "длину (length)";
+        if (!hasValidParam(params, "width") && !isSquare) miss << "ширину (width)";
+        if (!hasValidParam(params, "height") && !hasValidParam(params, "thickness")) miss << "высоту/толщину (height)";
+        if (userNums.size() < minNums || !miss.isEmpty()) {
+            if (miss.isEmpty()) {
+                miss << "длину" << "ширину" << "высоту/толщину";
+            }
+            missingReply = QString("Укажите недостающие параметры для построения плиты: %1 (в мм).").arg(miss.join(", "));
+            return false;
+        }
+        if (isSquare && !hasValidParam(params, "width")) {
+            params["width"] = params.value("length");
+        }
+        return true;
+    }
+
+    if (type == "cylinder" || type == "boss_cyl") {
+        QStringList miss;
+        if (!hasValidParam(params, "diameter") && !hasValidParam(params, "d") && !hasValidParam(params, "radius") && !hasValidParam(params, "r"))
+            miss << "диаметр (d)";
+        if (!hasValidParam(params, "height") && !hasValidParam(params, "h") && !hasValidParam(params, "length"))
+            miss << "высоту (height)";
+        if (userNums.size() < 2 || !miss.isEmpty()) {
+            if (miss.isEmpty()) miss << "диаметр (d)" << "высоту (height)";
+            missingReply = QString("Укажите недостающие параметры для построения цилиндра: %1 (в мм).").arg(miss.join(", "));
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "tube") {
+        QStringList miss;
+        if (!hasValidParam(params, "diameter") && !hasValidParam(params, "d") && !hasValidParam(params, "outer_d"))
+            miss << "наружный диаметр (d)";
+        if (!hasValidParam(params, "inner_diameter") && !hasValidParam(params, "inner_d") && !hasValidParam(params, "wall") && !hasValidParam(params, "thickness"))
+            miss << "внутренний диаметр (inner_diameter) или толщину стенки (wall)";
+        if (!hasValidParam(params, "height") && !hasValidParam(params, "h") && !hasValidParam(params, "length"))
+            miss << "высоту (height)";
+        if (userNums.size() < 3 || !miss.isEmpty()) {
+            if (miss.isEmpty()) miss << "наружный диаметр" << "внутренний диаметр" << "высоту";
+            missingReply = QString("Укажите недостающие параметры для построения трубы: %1 (в мм).").arg(miss.join(", "));
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "sphere" || type == "ball") {
+        if (userNums.isEmpty() || (!hasValidParam(params, "diameter") && !hasValidParam(params, "d") && !hasValidParam(params, "radius") && !hasValidParam(params, "r"))) {
+            missingReply = "Укажите диаметр сферы (d) в мм.";
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "cone") {
+        QStringList miss;
+        if (!hasValidParam(params, "d1") && !hasValidParam(params, "diameter") && !hasValidParam(params, "d"))
+            miss << "диаметр основания (d1)";
+        if (!hasValidParam(params, "height") && !hasValidParam(params, "h"))
+            miss << "высоту (height)";
+        if (userNums.size() < 2 || !miss.isEmpty()) {
+            if (miss.isEmpty()) miss << "диаметр основания (d1)" << "высоту (height)";
+            missingReply = QString("Укажите недостающие параметры для построения конуса: %1 (в мм).").arg(miss.join(", "));
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "polygon" || type == "prism") {
+        QStringList miss;
+        if (!hasValidParam(params, "diameter") && !hasValidParam(params, "d") && !hasValidParam(params, "size"))
+            miss << "диаметр вписанной/описанной окружности (d)";
+        if (!hasValidParam(params, "height") && !hasValidParam(params, "h"))
+            miss << "высоту (height)";
+        if (userNums.size() < 2 || !miss.isEmpty()) {
+            if (miss.isEmpty()) miss << "диаметр (d)" << "высоту (height)";
+            missingReply = QString("Укажите недостающие параметры для построения призмы: %1 (в мм).").arg(miss.join(", "));
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "chamfer") {
+        if (userNums.isEmpty() || (!hasValidParam(params, "size") && !hasValidParam(params, "s") && !hasValidParam(params, "distance"))) {
+            missingReply = "Укажите размер фаски (size) в мм.";
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "fillet") {
+        if (userNums.isEmpty() || (!hasValidParam(params, "radius") && !hasValidParam(params, "r") && !hasValidParam(params, "size"))) {
+            missingReply = "Укажите радиус скругления (radius) в мм.";
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "shell") {
+        if (userNums.isEmpty() || (!hasValidParam(params, "thickness") && !hasValidParam(params, "wall") && !hasValidParam(params, "t"))) {
+            missingReply = "Укажите толщину стенки оболочки (thickness) в мм.";
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "hole" || type == "cut_cyl") {
+        QStringList miss;
+        if (!hasValidParam(params, "diameter") && !hasValidParam(params, "d"))
+            miss << "диаметр отверстия (d)";
+        if (lowerDialog.contains("глух") && !hasValidParam(params, "depth"))
+            miss << "глубину отверстия (depth)";
+        if (userNums.isEmpty() || !miss.isEmpty()) {
+            if (miss.isEmpty()) miss << "диаметр отверстия (d)";
+            missingReply = QString("Укажите недостающие параметры для отверстия: %1 (в мм).").arg(miss.join(", "));
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "holes_corner") {
+        if (userNums.isEmpty() || (!hasValidParam(params, "diameter") && !hasValidParam(params, "d"))) {
+            missingReply = "Укажите диаметр угловых отверстий (d) и при необходимости отступ от края (offset) в мм.";
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "holes_circ") {
+        QStringList miss;
+        if (!hasValidParam(params, "diameter") && !hasValidParam(params, "d"))
+            miss << "диаметр отверстий (d)";
+        if (!hasValidParam(params, "circle_d") && !hasValidParam(params, "pcd") && !hasValidParam(params, "radius"))
+            miss << "диаметр делительной окружности (circle_d)";
+        if (userNums.size() < 2 || !miss.isEmpty()) {
+            if (miss.isEmpty()) miss << "диаметр отверстий (d)" << "диаметр окружности центров (circle_d)";
+            missingReply = QString("Укажите недостающие параметры для кругового массива отверстий: %1.").arg(miss.join(", "));
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "holes_grid") {
+        if (userNums.size() < 2 || (!hasValidParam(params, "diameter") && !hasValidParam(params, "d"))) {
+            missingReply = "Укажите параметры сетки отверстий: диаметр (d), шаг (step) и количество (count_x, count_z).";
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "cut_box" || type == "pocket") {
+        QStringList miss;
+        if (!hasValidParam(params, "length")) miss << "длину (length)";
+        if (!hasValidParam(params, "width")) miss << "ширину (width)";
+        if (!hasValidParam(params, "depth") && !hasValidParam(params, "height")) miss << "глубину (depth)";
+        if (userNums.size() < 2 || !miss.isEmpty()) {
+            if (miss.isEmpty()) miss << "длину" << "ширину" << "глубину";
+            missingReply = QString("Укажите недостающие параметры выреза/кармана: %1 (в мм).").arg(miss.join(", "));
+            return false;
+        }
+        return true;
+    }
+
+    if (type == "slot") {
+        QStringList miss;
+        if (!hasValidParam(params, "length")) miss << "длину паза (length)";
+        if (!hasValidParam(params, "width") && !hasValidParam(params, "d")) miss << "ширину паза (width)";
+        if (userNums.size() < 2 || !miss.isEmpty()) {
+            if (miss.isEmpty()) miss << "длину паза (length)" << "ширину паза (width)";
+            missingReply = QString("Укажите недостающие параметры паза: %1 (в мм).").arg(miss.join(", "));
+            return false;
+        }
+        return true;
+    }
+
+    if (userNums.isEmpty()) {
+        missingReply = "Укажите габаритные размеры элемента (в мм).";
+        return false;
+    }
+
+    return true;
+}
+
 OllamaClient::OllamaClient(QObject *parent)
     : QObject(parent),
       m_nam(new QNetworkAccessManager(this)),
@@ -117,6 +415,9 @@ void OllamaClient::updateContext(const QJsonArray &features, const QJsonObject &
         item["id"] = f.value("id");
         item["type"] = f.value("type");
         item["bounds"] = f.value("bounds");
+        QJsonObject p = f.value("params").toObject();
+        p.remove("edge_coords");
+        item["params"] = p;
         compactFeatures.append(item);
     }
     QJsonObject compactSel;
@@ -177,20 +478,54 @@ void OllamaClient::warmupModel() {
 
 QString OllamaClient::buildSystemPrompt() const {
     return QString(
-        "Ты - модуль автоматизации проектирования АЗИМУТ в САПР КОМПАС-3D. Отвечай СТРОГО валидным JSON на русском языке (поле reply сухое, до 5 слов, используй только обычный дефис - без тире и кавычек-елочек):\n"
+        "Ты - модуль автоматизации проектирования АЗИМУТ в САПР КОМПАС-3D. Отвечай СТРОГО валидным JSON на русском языке (используй только обычный дефис - без тире и кавычек-елочек):\n"
         "{\"reply\":\"Команда принята в обработку\",\"commands\":[{\"action\":\"build|update|delete|clear|undo|doc_new|doc_save|doc_delete|ask\","
-        "\"type\":\"plate|cylinder|tube|polygon|cone|sphere|torus|dome|hole|holes_corner|holes_circ|holes_grid|cut_box|slot|cross_slot|t_slot|counterbore|countersink|groove|chamfer|fillet|shell|shaft|rect_tube|l_profile|u_profile|i_beam|t_beam|spring|gear|flange|rib|bolt|nut|washer|screw|bearing|pin|key|appearance|profile\","
-        "\"id\":\"id_1\",\"params\":{}}]}\n"
-        "КООРДИНАТЫ:\n"
-        "1. Плоскость XOZ (y_offset=0). Первая деталь в (x:0, z:0, y_offset:0).\n"
-        "2. Вверх: +Y (direction:1), Вниз: -Y (direction:-1). Вправо: -Z, Влево: +Z, Вперед: -X, Назад: +X.\n"
-        "3. На верхней грани: base:\"top\", direction:1; на нижней: base:\"bottom\", direction:-1.\n"
-        "4. holes_corner: width, length, d, offset. Уклон angle: >0 наружу, <0 внутрь.\n"
-        "5. Стандартные изделия (bolt, nut, washer, screw, bearing, pin, key): М24 задает d:24, М24х180 задает d:24 и length:180. Если нет gost или размеров - action:\"ask\"."
+        "\"type\":\"cube|plate|cylinder|tube|polygon|cone|sphere|torus|dome|hole|holes_corner|holes_circ|holes_grid|cut_box|slot|cross_slot|t_slot|counterbore|countersink|groove|chamfer|fillet|shell|shaft|rect_tube|l_profile|u_profile|i_beam|t_beam|spring|gear|flange|rib|bolt|nut|washer|screw|bearing|pin|key|appearance|profile\","
+        "\"id\":\"уникальный_id\",\"params\":{}}]}\n"
+        "ПРАВИЛА:\n"
+        "1. ЗАПРЕЩЕНО придумывать размеры по умолчанию (100, 50 и т.д.), если пользователь их не указал! Если для новой операции (build) не указаны размеры (для cube: size; для plate: length, width, height; для cylinder: d, height; для chamfer: size; для fillet: radius; для hole: d) - верни action:\"ask\" и спроси недостающие размеры в reply.\n"
+        "2. Фаска (type:\"chamfer\", params:{\"size\":...}) и скругление (type:\"fillet\", params:{\"radius\":...}) - отдельные операции, никогда не меняй ими размер куба или плиты.\n"
+        "3. Плоскость XOZ (y_offset=0). Первая деталь в (x:0, z:0, y_offset:0). Вверх: +Y (direction:1), Вниз: -Y (direction:-1). Вправо: -Z, Влево: +Z, Вперед: -X, Назад: +X.\n"
+        "4. На верхней грани: base:\"top\", direction:1; на нижней: base:\"bottom\", direction:-1.\n"
+        "5. При перемещении детали передавай ТОЛЬКО одну команду action:\"update\" для первой базовой детали с новыми координатами (x, z, y_offset), НЕ меняя ее размеры.\n"
+        "6. При сохранении детали используй action:\"doc_save\", params:{\"name\":\"имя_файла\",\"dir\":\"D:\\\\Database AZIMUT\"}.\n"
+        "7. Стандартные изделия (bolt, nut, washer, screw, bearing, pin, key): М24 задает d:24, М24х180 задает d:24 и length:180. Если нет gost или размеров - action:\"ask\"."
     );
 }
 
 bool OllamaClient::tryHandleFastPath(const QString &userPrompt) {
+    QString trimmedPrompt = userPrompt.trimmed();
+    QString lowerPrompt = trimmedPrompt.toLower();
+
+    if (lowerPrompt.contains("сохран")) {
+        QString fileName = "Деталь_АЗИМУТ";
+        QRegularExpression nameRx("(?:как|именем|файл|деталь|проект)\\s+[\"«]?([\\wА-Яа-яЁё0-9_\\-]+)[\"»]?", QRegularExpression::CaseInsensitiveOption);
+        QRegularExpressionMatch m = nameRx.match(trimmedPrompt);
+        if (m.hasMatch()) {
+            QString candidate = m.captured(1).trimmed();
+            if (!candidate.isEmpty() && candidate.toLower() != "как" && candidate.toLower() != "в") {
+                fileName = candidate;
+            }
+        }
+        QJsonObject params;
+        params["name"] = fileName;
+        params["dir"] = "D:\\Database AZIMUT";
+        QJsonObject cmd;
+        cmd["action"] = "doc_save";
+        cmd["type"] = "doc_save";
+        cmd["id"] = "save_1";
+        cmd["params"] = params;
+        QJsonArray cmds;
+        cmds.append(cmd);
+        QJsonObject outPayload;
+        outPayload["commands"] = cmds;
+        QString finalReply = "Сохранение файла в D:\\Database AZIMUT.";
+        QTimer::singleShot(0, this, [this, finalReply, outPayload]() {
+            emit commandsReady(finalReply, outPayload);
+        });
+        return true;
+    }
+
     QString dialogText;
     for (const QJsonValue &hVal : m_history) {
         if (hVal.isObject() && hVal.toObject().value("role").toString() == "user") {
@@ -205,7 +540,7 @@ bool OllamaClient::tryHandleFastPath(const QString &userPrompt) {
         "шар", "сфер", "тор", "купол", "отверст", "карман", "вырез", "паз",
         "цеков", "зенков", "канавк", "фаск", "скругл", "оболочк", "вал",
         "уголок", "швеллер", "двутавр", "тавр", "пружин", "шестерн", "зубчат",
-        "фланец", "ребр", "цвет", "материал", "покрас"
+        "фланец", "ребр", "цвет", "материал", "покрас", "перемест", "сдвин"
     };
     for (const QString &kw : nonStdKeywords) {
         if (lowerDialog.contains(kw)) {
@@ -432,6 +767,8 @@ void OllamaClient::onReplyFinished() {
         }
     }
     dialogText += " " + m_lastUserPrompt;
+    QString lowerDialog = dialogText.toLower();
+    QString lowerLast = m_lastUserPrompt.toLower();
 
     QRegularExpression metricRx("(?:^|\\s)[МмMm]\\s*(\\d+(?:[.,]\\d+)?)(?:\\s*[xхXХ*]\\s*(\\d+(?:[.,]\\d+)?))?");
     QRegularExpressionMatch metricMatch = metricRx.match(dialogText);
@@ -439,7 +776,6 @@ void OllamaClient::onReplyFinished() {
     QRegularExpressionMatch gostMatch = gostRx.match(dialogText);
 
     QString detectedStdType;
-    QString lowerDialog = dialogText.toLower();
     if (lowerDialog.contains("болт")) detectedStdType = "bolt";
     else if (lowerDialog.contains("гайк")) detectedStdType = "nut";
     else if (lowerDialog.contains("шайб")) detectedStdType = "washer";
@@ -461,15 +797,23 @@ void OllamaClient::onReplyFinished() {
         commands.append(syntheticCmd);
     }
 
+    bool hasExistingFeatures = !m_currentContext.value("features").toArray().isEmpty();
+    bool isMovePrompt = isMoveCommandPrompt(lowerLast);
+    bool isModificationPrompt = m_history.isEmpty() && hasExistingFeatures && (
+        isMovePrompt || lowerLast.contains("пусть") || lowerLast.contains("измен") ||
+        lowerLast.contains("поменя") || lowerLast.contains("увелич") || lowerLast.contains("уменьш")
+    );
+
     QJsonArray executableCommands;
     bool needsAsk = false;
+    bool moveCommandAdded = false;
     const QStringList stdTypes = {"bolt", "nut", "washer", "screw", "bearing", "pin", "key", "standard_part"};
 
     for (const QJsonValue &val : commands) {
         if (!val.isObject()) continue;
         QJsonObject cmd = val.toObject();
-        QString action = cmd.value("action").toString("build");
-        QString type = cmd.value("type").toString();
+        QString action = cmd.value("action").toString("build").toLower();
+        QString type = cmd.value("type").toString().toLower();
 
         if (type == "standard_part" && !detectedStdType.isEmpty()) {
             type = detectedStdType;
@@ -478,7 +822,49 @@ void OllamaClient::onReplyFinished() {
 
         QJsonObject params = cmd.value("params").toObject();
 
-        if (stdTypes.contains(type)) {
+        if (action == "doc_save" || type == "doc_save" || action == "save") {
+            params["dir"] = "D:\\Database AZIMUT";
+            cmd["action"] = "doc_save";
+            cmd["params"] = params;
+            executableCommands.append(cmd);
+            continue;
+        }
+
+        if (lowerLast.contains("фаск") && !isMovePrompt && action != "delete" && action != "undo" && action != "clear") {
+            type = "chamfer";
+            cmd["type"] = "chamfer";
+            cmd["id"] = "chamfer_1";
+            QList<double> lNums = extractUserNumbers(m_lastUserPrompt);
+            params.remove("width");
+            params.remove("length");
+            params.remove("height");
+            if (!lNums.isEmpty()) {
+                params["size"] = lNums.first();
+                if (action == "ask" || action == "none") action = "build";
+            } else {
+                action = "ask";
+            }
+            cmd["action"] = action;
+            cmd["params"] = params;
+        } else if (lowerLast.contains("скругл") && !isMovePrompt && action != "delete" && action != "undo" && action != "clear") {
+            type = "fillet";
+            cmd["type"] = "fillet";
+            cmd["id"] = "fillet_1";
+            QList<double> lNums = extractUserNumbers(m_lastUserPrompt);
+            params.remove("width");
+            params.remove("length");
+            params.remove("height");
+            if (!lNums.isEmpty()) {
+                params["radius"] = lNums.first();
+                if (action == "ask" || action == "none") action = "build";
+            } else {
+                action = "ask";
+            }
+            cmd["action"] = action;
+            cmd["params"] = params;
+        }
+
+        if (stdTypes.contains(type) && !isModificationPrompt) {
             if (metricMatch.hasMatch()) {
                 if (!hasValidParam(params, "d") && !hasValidParam(params, "diameter")) {
                     params["d"] = metricMatch.captured(1).replace(',', '.').toDouble();
@@ -526,10 +912,65 @@ void OllamaClient::onReplyFinished() {
             continue;
         }
 
-        if (action == "ask" || action == "none") {
-            needsAsk = true;
-            continue;
+        if (isModificationPrompt && action == "build" && type != "chamfer" && type != "fillet") {
+            action = "update";
+            cmd["action"] = "update";
         }
+
+        if (action == "ask" || action == "none") {
+            QString missingMsg;
+            if (!validateAndCleanBuildParams(type, params, dialogText, m_lastUserPrompt, missingMsg)) {
+                replyText = sanitizeText(missingMsg);
+                needsAsk = true;
+                continue;
+            }
+            action = "build";
+            cmd["action"] = "build";
+            cmd["type"] = type;
+            cmd["params"] = params;
+        }
+
+        if (action == "build") {
+            QString missingMsg;
+            if (!validateAndCleanBuildParams(type, params, dialogText, m_lastUserPrompt, missingMsg)) {
+                needsAsk = true;
+                replyText = sanitizeText(missingMsg);
+                continue;
+            }
+            cmd["type"] = type;
+            cmd["params"] = params;
+        } else if (action == "update") {
+            bool hasPositionChange = isMovePrompt ||
+                                     params.contains("x") ||
+                                     params.contains("z") ||
+                                     params.contains("y_offset") ||
+                                     params.contains("z_offset");
+            if (hasPositionChange) {
+                if (moveCommandAdded) {
+                    continue;
+                }
+                params.remove("size");
+                params.remove("width");
+                params.remove("length");
+                params.remove("height");
+                params.remove("diameter");
+                params.remove("d");
+                params.remove("radius");
+                params.remove("r");
+                moveCommandAdded = true;
+            } else if (lowerLast.contains("куб") || type == "cube") {
+                QList<double> lNums = extractUserNumbers(m_lastUserPrompt);
+                if (lNums.size() == 1) {
+                    double side = lNums.first();
+                    params["size"] = side;
+                    params["width"] = side;
+                    params["length"] = side;
+                    params["height"] = side;
+                }
+            }
+            cmd["params"] = params;
+        }
+
         executableCommands.append(cmd);
     }
 

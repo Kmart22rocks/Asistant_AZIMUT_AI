@@ -1,8 +1,86 @@
+import math
 import pythoncom
 from features.base_feature import BaseFeature
 
 
 class ShellFeature(BaseFeature):
+    def _get_face_center(self, f_ent):
+        try:
+            raw_fdef = f_ent.GetDefinition()
+            if not raw_fdef:
+                return None
+            fdef = self.m5.ksFaceDefinition(
+                raw_fdef._oleobj_.QueryInterface(self.m5.ksFaceDefinition.CLSID, pythoncom.IID_IDispatch)
+            )
+            raw_ecol = fdef.EdgeCollection()
+            if not raw_ecol:
+                return None
+            ecol = self.m5.ksEntityCollection(
+                raw_ecol._oleobj_.QueryInterface(self.m5.ksEntityCollection.CLSID, pythoncom.IID_IDispatch)
+            )
+            if ecol.GetCount() == 0:
+                return None
+            sx, sy, sz = 0.0, 0.0, 0.0
+            cnt = 0
+            for j in range(ecol.GetCount()):
+                e_ent = self._wrap_entity(ecol.GetByIndex(j))
+                if not e_ent:
+                    continue
+                raw_edef = e_ent.GetDefinition()
+                if not raw_edef:
+                    continue
+                edef = self.m5.ksEdgeDefinition(
+                    raw_edef._oleobj_.QueryInterface(self.m5.ksEdgeDefinition.CLSID, pythoncom.IID_IDispatch)
+                )
+                for is_first in (True, False):
+                    v_raw = edef.GetVertex(is_first)
+                    if v_raw:
+                        vdef = self.m5.ksVertexDefinition(
+                            v_raw._oleobj_.QueryInterface(self.m5.ksVertexDefinition.CLSID, pythoncom.IID_IDispatch)
+                        )
+                        pt = vdef.GetPoint()
+                        if isinstance(pt, tuple) and len(pt) >= 4:
+                            sx += float(pt[1])
+                            sy += float(pt[2])
+                            sz += float(pt[3])
+                            cnt += 1
+            if cnt > 0:
+                return [sx / cnt, sy / cnt, sz / cnt]
+        except Exception:
+            pass
+        return None
+
+    def _find_faces_by_coords(self, target_coords):
+        found = []
+        try:
+            raw_faces = self.part.EntityCollection(self.const.o3d_face)
+            if not raw_faces:
+                return found
+            fcol = self.m5.ksEntityCollection(
+                raw_faces._oleobj_.QueryInterface(self.m5.ksEntityCollection.CLSID, pythoncom.IID_IDispatch)
+            )
+            candidates = []
+            for i in range(fcol.GetCount()):
+                f_ent = self._wrap_entity(fcol.GetByIndex(i))
+                if not f_ent:
+                    continue
+                c = self._get_face_center(f_ent)
+                if c is not None:
+                    candidates.append((f_ent, c))
+            for tc in target_coords:
+                best_f = None
+                best_d = 1e9
+                for f_ent, c in candidates:
+                    d = math.sqrt((c[0] - tc[0]) ** 2 + (c[1] - tc[1]) ** 2 + (c[2] - tc[2]) ** 2)
+                    if d < best_d:
+                        best_d = d
+                        best_f = f_ent
+                if best_f is not None and best_d < 25.0:
+                    found.append(best_f)
+        except Exception:
+            pass
+        return found
+
     def _find_top_face(self):
         try:
             raw_faces = self.part.EntityCollection(self.const.o3d_face)
@@ -25,37 +103,10 @@ class ShellFeature(BaseFeature):
                 )
                 if not fdef.IsPlanar():
                     continue
-                raw_ecol = fdef.EdgeCollection()
-                if not raw_ecol:
-                    continue
-                ecol = self.m5.ksEntityCollection(
-                    raw_ecol._oleobj_.QueryInterface(self.m5.ksEntityCollection.CLSID, pythoncom.IID_IDispatch)
-                )
-                if ecol.GetCount() == 0:
-                    continue
-                y_sum = 0.0
-                v_cnt = 0
-                for j in range(ecol.GetCount()):
-                    e_ent = self._wrap_entity(ecol.GetByIndex(j))
-                    if not e_ent:
-                        continue
-                    edef = self.m5.ksEdgeDefinition(
-                        e_ent.GetDefinition()._oleobj_.QueryInterface(self.m5.ksEdgeDefinition.CLSID, pythoncom.IID_IDispatch)
-                    )
-                    v1_raw = edef.GetVertex(True)
-                    if v1_raw:
-                        v1 = self.m5.ksVertexDefinition(
-                            v1_raw._oleobj_.QueryInterface(self.m5.ksVertexDefinition.CLSID, pythoncom.IID_IDispatch)
-                        )
-                        pt = v1.GetPoint()
-                        if isinstance(pt, tuple) and len(pt) >= 4:
-                            y_sum += float(pt[2])
-                            v_cnt += 1
-                if v_cnt > 0:
-                    avg_y = y_sum / v_cnt
-                    if avg_y > max_y:
-                        max_y = avg_y
-                        best_face = f_ent
+                c = self._get_face_center(f_ent)
+                if c is not None and c[1] > max_y:
+                    max_y = c[1]
+                    best_face = f_ent
             return best_face
         except Exception:
             return None
@@ -65,6 +116,8 @@ class ShellFeature(BaseFeature):
         self.params.update(params)
         thickness = float(self.params.get("thickness", self.params.get("wall", self.params.get("t", 2.0))))
         outward = bool(self.params.get("outward", False))
+        self.params["thickness"] = thickness
+        self.params["outward"] = outward
 
         shell_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_shellOperation))
         raw_def = shell_ent.GetDefinition()
@@ -81,8 +134,23 @@ class ShellFeature(BaseFeature):
 
         selected_faces = self._get_selected_entities(target_type=self.const.o3d_face)
         if selected_faces:
+            saved_coords = []
             for f in selected_faces:
                 arr.Add(f)
+                c = self._get_face_center(f)
+                if c is not None:
+                    saved_coords.append(c)
+            if saved_coords:
+                self.params["edge_coords"] = saved_coords
+        elif "edge_coords" in self.params and self.params["edge_coords"]:
+            matched = self._find_faces_by_coords(self.params["edge_coords"])
+            if matched:
+                for f in matched:
+                    arr.Add(f)
+            else:
+                top_face = self._find_top_face()
+                if top_face is not None:
+                    arr.Add(top_face)
         else:
             top_face = self._find_top_face()
             if top_face is not None:
@@ -114,6 +182,16 @@ class HolesGridFeature(BaseFeature):
         depth = float(self.params.get("depth", 10.0))
         y_offset = float(self.params.get("y_offset", self.params.get("z_offset", 0.0)))
 
+        self.params["x"] = cx
+        self.params["z"] = cz
+        self.params["y_offset"] = y_offset
+        self.params["z_offset"] = y_offset
+        self.params["diameter"] = diameter
+        self.params["count_x"] = count_x
+        self.params["count_z"] = count_z
+        self.params["step_x"] = step_x
+        self.params["step_z"] = step_z
+
         plane = self._get_work_plane(y_offset)
         sketch_ent, sketch_def = self._create_sketch(plane)
         doc2d = self._begin_sketch_edit(sketch_def)
@@ -132,10 +210,28 @@ class HolesGridFeature(BaseFeature):
         sketch_def.EndEdit()
 
         self._extrude_cut(sketch_ent, depth, through, f"МассивОтверстий_{self.feature_id}")
-        return True, f"Выполнен массив из {total} отверстий Ø{diameter} мм ({count_x}x{count_z})"
+        return True, f"Выполнен массив из {total} отверстий d={diameter} мм ({count_x}x{count_z})"
 
 
 class SteppedShaftFeature(BaseFeature):
+    def _get_xy_work_plane(self, z_coord):
+        base_plane = self._wrap_entity(self.part.GetDefaultEntity(self.PLANE_XY))
+        if abs(z_coord) < 1e-5:
+            return base_plane
+        plane_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_planeOffset))
+        raw_def = plane_ent.GetDefinition()
+        plane_def = self.m5.ksPlaneOffsetDefinition(
+            raw_def._oleobj_.QueryInterface(self.m5.ksPlaneOffsetDefinition.CLSID, pythoncom.IID_IDispatch)
+        )
+        plane_def.SetPlane(base_plane)
+        plane_def.offset = float(z_coord)
+        plane_def.direction = True
+        plane_ent.name = f"ПлоскостьВала_{self.feature_id}"
+        plane_ent.hidden = True
+        plane_ent.Create()
+        self.aux_entities.append(plane_ent)
+        return plane_ent
+
     def build(self, params):
         self.sync_refs()
         self.params.update(params)
@@ -149,9 +245,11 @@ class SteppedShaftFeature(BaseFeature):
 
         bore_d = float(self.params.get("inner_diameter", self.params.get("bore", 0.0)))
         inner_r = max(0.0, bore_d / 2.0)
+        cx = float(self.params.get("x", 0.0))
+        cz = float(self.params.get("z", 0.0))
         y_start = float(self.params.get("y_offset", self.params.get("z_offset", 0.0)))
 
-        plane_xy = self._wrap_entity(self.part.GetDefaultEntity(self.PLANE_XY))
+        plane_xy = self._get_xy_work_plane(cz)
         sketch_ent, sketch_def = self._create_sketch(plane_xy, f"ЭскизВала_{self.feature_id}")
         doc2d = self._begin_sketch_edit(sketch_def)
 
@@ -161,19 +259,23 @@ class SteppedShaftFeature(BaseFeature):
             d = float(st.get("diameter", st.get("d", 30.0)))
             h = float(st.get("height", st.get("length", st.get("h", 20.0))))
             r = max(inner_r + 1.0, d / 2.0)
-            doc2d.ksLineSeg(prev_r, cur_y, r, cur_y, 1)
-            doc2d.ksLineSeg(r, cur_y, r, cur_y + h, 1)
+            doc2d.ksLineSeg(cx + prev_r, cur_y, cx + r, cur_y, 1)
+            doc2d.ksLineSeg(cx + r, cur_y, cx + r, cur_y + h, 1)
             cur_y += h
             prev_r = r
 
         total_h = cur_y - y_start
-        doc2d.ksLineSeg(prev_r, cur_y, inner_r, cur_y, 1)
-        doc2d.ksLineSeg(inner_r, cur_y, inner_r, y_start, 1)
-        doc2d.ksLineSeg(0.0, y_start, 0.0, cur_y, 3)
+        doc2d.ksLineSeg(cx + prev_r, cur_y, cx + inner_r, cur_y, 1)
+        doc2d.ksLineSeg(cx + inner_r, cur_y, cx + inner_r, y_start, 1)
+        doc2d.ksLineSeg(cx, y_start, cx, cur_y, 3)
         sketch_def.EndEdit()
 
+        self.params["x"] = cx
+        self.params["z"] = cz
         self.params["height"] = total_h
+        self.params["y_offset"] = y_start
         self.params["z_offset"] = y_start
+        self.params["steps"] = steps
 
         rot_ent = self._wrap_entity(self.part.NewEntity(self.const.o3d_bossRotated))
         raw_def = rot_ent.GetDefinition()
